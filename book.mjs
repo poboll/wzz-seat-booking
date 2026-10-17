@@ -1005,12 +1005,9 @@ post('/api/face', async (_q, body, r) => {
 });
 
 // ============ 开门（真实硬件指令，会让门锁动作）============
-// HAR 实证：开门是纯服务端 HTTP —— 请求体里 lat/lon/wifiName/hardwareMessageId 全由客户端提供，
-// 服务端只做「你报的位置离门店够不够近」的判定，再下发指令。HAR 里那两次 317「当前距离过大」
-// 的原因已查明：提交的坐标是 43.86/87.54（乌鲁木齐），而这家绵阳店真实坐标是 31.4534/104.7199，
-// 相距约 2000km。开门容差由门店字段 storeDistanceStipulation 给出（实测 1000 = 1km）。
-// 所以这里默认提交「订单详情自带的门店坐标」。1km 的容差远大于蓝牙作用范围，
-// 这也印证了用户的判断：这个门锁是走网络下发、不是靠蓝牙近场握手的。
+// 服务的请求体里 lat/lon/wifiName/hardwareMessageId 全由客户端提供，服务端只做「提交点与门店点
+// 距离是否在允许范围内」的判定，再下发指令。所以这里默认提交「订单详情自带的门店坐标」。
+// 注意：这仍然是本人订单对应的锁，但它的近场校验形同虚设 —— 请只开自己的门，别替不在场的人开。
 post('/api/door', async (_q, body, r) => {
   const orderId = body?.orderId;
   if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
@@ -1039,9 +1036,9 @@ post('/api/door', async (_q, body, r) => {
   const code = inner?.code;
   const okCode = code === 2000 || code === 200;
   const readable = {
-    2000: '门已开 —— 门锁收到了指令并已动作（实测通过时返回的就是这个码）。',
-    317: '当前距离过大 —— 服务端认为提交的定位离门店太远（容差 = 门店字段 storeDistanceStipulation，通常 1000m）。',
-    316: '不在可开门时间内 —— 受订单字段 advanceOpeningTime 限制（本单是 20 分钟）。',
+    2000: '门已开 —— 门锁收到了指令并已动作。',
+    317: '当前距离过大 —— 服务端认为提交的定位离门店太远。',
+    316: '不在可开门时间内 —— 受订单的「可提前开门」字段限制。',
   }[code] || null;
   send(r, {
     ok: !!okCode,
