@@ -74,12 +74,13 @@ const CONFIG = {
   homeLon: 87.6, homeLat: 43.8,      // confirmSeat 的 remarks（下单不校验位置）
 };
 
-// 兜底 token（首次运行 auth.json 不存在时用；之后一律以 auth.json 为准）
+// 兜底 token：**不内置任何真实凭证**。请把 auth.json（.gitignore 已排除）放在本目录，
+// 或用「我的 → 更新 JWT token」面板从 HAR 抓包一键写入。
 const DEFAULT_AUTH = {
-  token: 'REDACTED-CREDENTIAL',
+  token: '',
   ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.78(0x18004e33) NetType/WIFI Language/zh_CN',
-  savedAt: '2026-10-16T19:04:40+08:00',
-  source: '初始内置（来自 Stream-2026-10-16 19:04:40.har）',
+  savedAt: null,
+  source: '尚未配置，请从「我的 → 更新 JWT token」写入',
 };
 
 const AUTH_FILE = path.join(__dirname, 'auth.json');
