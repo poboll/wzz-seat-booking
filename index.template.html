@@ -117,6 +117,23 @@
     pre { border-radius: 8px; font-size: 12px; }
   }
 </style>
+<style>
+  /* README 首个 <div align="center"> 升级成 hero 卡片 */
+  div[align="center"] {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 40px;
+    margin-bottom: 32px;
+  }
+  div[align="center"] h1 { margin-top: 0; }
+  .badges { margin-top: 20px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    font-size: 12.5px; padding: 4px 12px; border-radius: 999px;
+    background: #eef2ff; color: var(--brand); border: 1px solid #dbe4ff;
+    font-weight: 500;
+  }
+</style>
 </head>
 <body>
 <div class="wrap">
