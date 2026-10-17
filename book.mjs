@@ -157,7 +157,8 @@ const ORDER_STATUS = {
   1: { label: '待支付', tone: 'warn', conf: 'confirmed', hint: '还没结算。用月卡抵扣后才会变「已支付」。' },
   3: { label: '已支付（待使用）', tone: 'ok', conf: 'confirmed', hint: '钱/卡已结清。到时段前后可以开门、开灯。' },
   6: { label: '使用中', tone: 'blue', conf: 'confirmed', hint: '当前正处于预约时段内，座位已锁定。此状态下能开门 / 开灯 / 退座。' },
-  8: { label: '已结束', tone: 'mute', conf: 'confirmed', hint: '已退座或时段已过。座位已释放，无法再开门。' },
+  4: { label: '已取消', tone: 'mute', conf: 'confirmed', hint: '用「取消预约」撤销了这单，座位已释放、月卡天数不退。' },
+    8: { label: '已结束', tone: 'mute', conf: 'confirmed', hint: '已退座或时段已过。座位已释放，无法再开门。' },
 };
 
 function statusInfo(code) {
@@ -273,6 +274,54 @@ const toMin = t => { const [h, m] = String(t).split(':').map(Number); return h *
 // 计费：向上取整到 continueTimeUnit（HAR 实证 267min → 4.5h，unit=30）
 function billableMinutes(minutes, unit = 30) { return Math.ceil(minutes / unit) * unit; }
 
+// ======================= 月卡 / 卡券 =======================
+// 权威来源：GET /card/user_cards（无需入参，返回用户全部卡）。
+// 注意：/api/status 里 token.exp（2026/11/15）是 **JWT 的过期时间**，不是月卡有效期
+// （月卡是 2026-11-11 23:59:59）。早先把两者混为一谈，正是「月卡剩余时间和
+// 截止日期显示不正确」的根因。
+const CARD_STATUS = {
+  1: { label: '生效中', tone: 'ok',   usable: true  },
+  2: { label: '未生效', tone: 'mute', usable: false },
+  3: { label: '已用完', tone: 'mute', usable: false },
+  4: { label: '不可用', tone: 'warn', usable: false },
+  5: { label: '已过期', tone: 'mute', usable: false },
+};
+const cardCache = { ts: 0, data: null };
+const CARD_TTL = 3 * 60 * 1000;
+
+function normalizeCard(c) {
+  const st = CARD_STATUS[c && c.status] || { label: '状态' + (c && c.status), tone: 'mute', usable: false };
+  const exp = c && c.expiredTime ? String(c.expiredTime).slice(0, 16) : null;
+  let daysLeft = null;
+  if (c && c.expiredTime) {
+    const t = new Date(String(c.expiredTime).replace(' ', 'T')).getTime();
+    if (!isNaN(t)) daysLeft = Math.ceil((t - Date.now()) / 86400000);
+  }
+  const isHour = c && c.cardTypeCode === 'HOUR';
+  return {
+    userCardId: c && c.userCardId, cardId: c && c.cardId, name: c && c.cardName,
+    typeCode: c && c.cardTypeCode, remain: c && c.remainValue,
+    remainUnit: isHour ? '小时' : '天',
+    expiredTime: exp, daysLeft,
+    status: c && c.status, statusLabel: st.label, tone: st.tone, usable: st.usable,
+    activateStatus: c && c.activateStatus,
+    image: (c && (c.showImage || (Array.isArray(c.showImageList) && c.showImageList[0]))) || null,
+  };
+}
+
+async function getCards(force) {
+  if (!force && cardCache.data && Date.now() - cardCache.ts < CARD_TTL) return cardCache.data;
+  const resp = await api('/card/user_cards', null, 'GET');
+  const raw = Array.isArray(resp && resp.data) ? resp.data : (Array.isArray(resp) ? resp : []);
+  const cards = raw.map(normalizeCard);
+  // 主卡 = 生效中且按天计费的那张（月卡）
+  const primary = cards.find(c => c.usable && c.typeCode === 'DAY')
+    || cards.find(c => c.usable) || cards[0] || null;
+  cardCache.ts = Date.now();
+  cardCache.data = { cards, primary };
+  return cardCache.data;
+}
+
 // ======================= 路由 =======================
 const routes = [];
 const get = (p, h) => routes.push({ method: 'GET', pattern: p, handler: h });
@@ -297,6 +346,10 @@ get('/api/status', async (q, _b, r) => {
     cities = new Set([...z.map.values()].map(s => s.city)).size;
   } catch { }
 
+  let cards = null, primaryCard = null, cardMsg = null;
+  try { const c = await getCards(false); cards = c.cards; primaryCard = c.primary; }
+  catch (e) { cardMsg = e.message; }
+
   send(r, {
     ok: true,
     token: t ? {
@@ -310,8 +363,86 @@ get('/api/status', async (q, _b, r) => {
     tokenSource: a.source, tokenSavedAt: a.savedAt,
     zeroCount, zeroStale, storesAt, failMsg, cities,
     cardId: CONFIG.zeroCardId,
+    cards, primaryCard, cardMsg,
     allowCardSettle: CONFIG.allowCardSettle,
     orderStatusMap: ORDER_STATUS,
+  });
+});
+
+// ---------- 卡券列表（新鲜拉取）----------
+get('/api/cards', async (q, _b, r) => {
+  try { const c = await getCards(q.force === '1'); send(r, { ok: true, ...c }); }
+  catch (e) { send(r, { ok: false, msg: e.message }, 502); }
+});
+
+// ---------- 取消预约 ----------
+// 官方小程序有「取消预约」按钮（用户确认）。两份 HAR 都没抓到它，靠 840 个候选
+// 路由爆破找到：POST /seat/order/cancelReservation，form-urlencoded，只需 orderId。
+// 规则来自 queryCancelRule：aheadCancelBookingMinutes=30 —— 离开车不足 30 分钟再取消
+// 属违约，按 bookingAheadCloseDeductMinutes=30 扣减（用户所述「违约扣 30 分钟」）。
+post('/api/cancel', async (q, b, r) => {
+  const orderId = b.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (b.confirm !== true) {
+    return send(r, { ok: false, blocked: true, needConfirm: true, msg: '取消预约会释放座位，需要二次确认' }, 409);
+  }
+  let before;
+  try { before = await api('/seat/order/queryOrderDetails', { orderId }); }
+  catch (e) { return send(r, { ok: false, msg: '查单失败：' + e.message }, 502); }
+  const d = before && before.data;
+  if (!d || !d.orderId) return send(r, { ok: false, msg: (before && before.msg) || '订单不存在' }, 404);
+
+  const st = Number(d.orderStatus);
+  if (st === 8) return send(r, { ok: false, msg: '这单已经结束了，不用取消' }, 409);
+
+  const beginStr = d.studyBeginTime || d.beginTime || null;
+
+  // 门店取消规则 + 离开车时间还有多久
+  let rule = null;
+  try {
+    const storeId = d.storeId || d.orgId;
+    if (storeId) rule = (await api(`/seat/order/${encodeURIComponent(storeId)}/queryCancelRule`)).data || null;
+  } catch { }
+  let leadMin = null;
+  if (beginStr) {
+    const t = new Date(String(beginStr).replace(' ', 'T')).getTime();
+    if (!isNaN(t)) leadMin = Math.floor((t - Date.now()) / 60000);
+  }
+  const need = Number((rule && rule.aheadCancelBookingMinutes) ?? 30);
+  const deduct = Number((rule && rule.bookingAheadCloseDeductMinutes) ?? 30);
+  const penalty = leadMin != null && leadMin > 0 && leadMin < need;
+
+  let res = null, err = null;
+  try { res = await apiForm('/seat/order/cancelReservation', { orderId, appId: CONFIG.appId }); }
+  catch (e) { err = e.message; }
+
+  // 成功与否以**回读服务端真值**为准，不信返回码的自我祝贺
+  let after = null;
+  try { after = await api('/seat/order/queryOrderDetails', { orderId }, 'GET', null, 12000, 1); } catch { }
+  const ad = after && after.data;
+  const afterStatus = ad && ad.orderId ? Number(ad.orderStatus) : null;
+  const gone = !ad || !ad.orderId;
+  const cancelled = gone || afterStatus === 8;
+
+  let cardAfter = null;
+  if (cancelled) { try { cardAfter = (await getCards(true)).primary; } catch { } }
+
+  send(r, {
+    ok: !!cancelled,
+    code: Number((res && res.data && res.data.code) ?? (res && res.code)) || null,
+    message: (res && ((res.data && res.data.message) || res.msg)) || err || null,
+    raw: (res && (res.data || res)) || null,
+    before: { orderStatus: st, label: (ORDER_STATUS[st] || {}).label || '状态' + st, begin: beginStr },
+    after: afterStatus != null
+      ? { orderStatus: afterStatus, label: (ORDER_STATUS[afterStatus] || {}).label || '状态' + afterStatus }
+      : (gone ? { orderStatus: null, label: '订单已不在列表（已取消）' } : null),
+    leadMin, rule: rule ? { need, deduct } : null, penalty,
+    penaltyNote: leadMin == null ? null
+      : leadMin <= 0 ? '已经过了开始时间，取消属于违约'
+      : penalty ? `离开车只剩 ${leadMin} 分钟（少于门店要求的提前 ${need} 分钟），属于违约，扣减 ${deduct} 分钟`
+                : `离开车还有 ${leadMin} 分钟，满足「提前 ${need} 分钟取消」，不违约`,
+    cardAfter: cardAfter ? { name: cardAfter.name, remain: cardAfter.remain, remainUnit: cardAfter.remainUnit } : null,
+    msg: cancelled ? '已取消预约' : (err || (res && res.msg) || '取消失败'),
   });
 });
 
@@ -1198,7 +1329,7 @@ server.listen(CONFIG.port, CONFIG.host, async () => {
     if (probe?.success === true || probe?.code === 200) console.log('  → token 探活：正常');
     else console.log(`  ⚠ token 探活失败：${probe?.msg || probe?.code || '未知'} —— 若你在微信里重新登录过，旧 token 会被顶掉；网页「我的 → 更新 token」一键换。`);
   } catch { }
-  console.log('  → 只订 0 元店；支付（非 0 元）/ 开门 / 取消请回原 App');
+  console.log('  → 只订 0 元店；开门 / 提前入座 / 退座 / 取消预约 都在订单详情页直接做');
   try {
     const z = await getZeroStores();
     console.log(`  → 月卡 0 元覆盖：${z.total} 家${z.stale ? `（种子兜底，实时拉取失败：${z.failMsg || ''}）` : ''}`);

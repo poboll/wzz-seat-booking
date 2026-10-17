@@ -520,18 +520,18 @@ img{display:block}
 
   <!-- tabBar -->
   <div class="tabbar" id="tabbar">
-    <button data-tab="stores" class="on">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 4.8 4h14.4L21 9.5"/><path d="M4 9.5h16V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9.5Z"/><path d="M9.5 21v-6h5v6"/></svg>
-      <span>门店</span>
+    <button data-tab="orders" class="on">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8.5 8.5h7M8.5 12.5h7M8.5 16.5h4"/></svg>
+      <span>订单</span>
+      <span class="badge" id="tab-badge" hidden></span>
     </button>
     <button data-tab="book">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18v4H3z"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 14h6"/></svg>
-      <span>选座</span>
+      <span>预订</span>
     </button>
-    <button data-tab="orders">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8.5 8.5h7M8.5 12.5h7M8.5 16.5h4"/></svg>
-      <span>预约</span>
-      <span class="badge" id="tab-badge" hidden></span>
+    <button data-tab="stores">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 4.8 4h14.4L21 9.5"/><path d="M4 9.5h16V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9.5Z"/><path d="M9.5 21v-6h5v6"/></svg>
+      <span>门店</span>
     </button>
     <button data-tab="me">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 21c.6-4 3.7-6.2 7.5-6.2S19 17 19.6 21"/></svg>
@@ -568,8 +568,8 @@ const state = {
 };
 
 /* ---------------- 小程序式路由 ---------------- */
-const TITLES = { stores:'王知之自习室', book:'选择座位', orders:'我的预约', me:'我的', store:'门店详情', order:'预约详情', token:'更新 token' };
-const NAV_TABS = ['stores', 'book', 'orders', 'me'];
+const TITLES = { stores:'王知之自习室', book:'选择座位', orders:'我的订单', me:'我的', store:'门店详情', order:'预约详情', token:'更新 token' };
+const NAV_TABS = ['orders', 'book', 'stores', 'me'];
 
 function push(page, opts = {}) {
   if (state.page === page && !opts.force) return render(page, 'none');
@@ -584,7 +584,7 @@ function replace(page, anim = 'none') {
 function back() {
   const prev = state.stack.pop();
   if (prev) { state.page = prev; render(prev, 'pop'); }
-  else go('stores');
+  else go('orders');
 }
 function go(tab) {
   state.stack = [];
@@ -609,7 +609,7 @@ function render(page, anim) {
 document.querySelectorAll('#tabbar button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'book' && !state.store) {
     // 「选座」是二级页，没选门店时先引导去门店
-    toast('先在「门店」里选一家 0 元店', 'wide');
+    toast('先在「门店」里挑一家 0 元店', 'wide');
     go('stores'); return;
   }
   go(b.dataset.tab);
@@ -747,18 +747,17 @@ PAGES.book = () => `
 /* —— 我的预约 —— */
 PAGES.orders = () => `
   <div class="page-inner">
-    <div id="order-list" style="margin-top:12px"><div class="page-loading"><span class="spinner"></span> 正在获取预约…</div></div>
+    <div id="order-list" style="margin-top:12px"><div class="page-loading"><span class="spinner"></span> 正在获取订单…</div></div>
     <div id="order-hist"></div>
     <div class="group">
       <div class="cell tap" id="oid-toggle">
-        <div class="c-main"><div class="c-title link">按订单号查单</div>
-          <div class="c-desc">「当前预约」只列活跃的单，退座 / 结束就消失；用订单号可以回查</div></div>
+        <div class="c-main"><div class="c-title">按订单号查单</div></div>
         <span class="chev" id="oid-chev"></span></div>
     </div>
     <div id="oid-panel" style="display:none">
       <div class="group">
         <div class="inputs" style="padding:4px 16px 10px">
-          <div class="inp" style="flex:1;min-width:0"><label>订单号</label><input id="oid" placeholder="20261016190304553-014486CTIMe8M0"></div>
+          <div class="inp" style="flex:1;min-width:0"><label>订单号</label><input id="oid" placeholder="20261017002355314-017224Jo1Z270r"></div>
         </div>
         <div class="cell tap" id="oid-go"><div class="c-main"><div class="c-title link">查询这一单</div></div><span class="chev"></span></div>
       </div>
@@ -771,89 +770,69 @@ PAGES.order = () => {
   if (!o) return '<div class="empty">订单不存在</div>';
   const si = o.statusInfo || { label: '状态 ' + o.orderStatus, tone: 'mute', conf: 'unknown' };
   const st = ['ok', 'warn', 'bad', 'mute', 'blue'].includes(si.tone) ? si.tone : 'mute';
-  // 只有「已支付(3)」「使用中(6)」才允许碰硬件；1 待支付 / 8 已结束都不行
-  const live = [3, 6].includes(Number(o.orderStatus));
+  const code = Number(o.orderStatus);
+  const live = [3, 6].includes(code);        // 已支付 / 使用中 才能碰硬件
   const hasDev = !!(o.devices && o.devices.length);
+  const canCancel = code === 3;              // 实测：只有「已支付」能取消（待支付返回 999998）
+  const cancelWhy = code === 1 ? '待支付的单平台不让取消，等它自动失效'
+    : code === 6 ? '已在用，请点「退座」' : code === 4 ? '这一单已经取消过了' : code === 8 ? '这一单已经结束' : '';
   return `
   <div class="page-inner">
-    <div class="group">
+    <div class="group" style="margin-top:12px">
       <div class="cell" style="min-height:64px">
         <div class="c-main">
           <div class="c-title">${esc(o.storeName || '—')}</div>
-          <div class="c-desc">${esc(o.area || '')}</div>
+          <div class="c-desc">${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号${o.area ? ' · ' + esc(o.area) : ''}</div>
         </div>
         <span class="pill ${st}">${esc(si.label)}</span>
       </div>
-      <div class="cell"><div class="c-main"><div class="c-title">订单状态码</div></div>
-        <div class="c-extra"><span class="mono">orderStatus = ${esc(String(o.orderStatus))}</span></div></div>
-      ${si.hint ? `<div class="tip" style="padding-top:6px">⚠ ${esc(si.hint)}</div>` : ''}
+      <div class="cell"><div class="c-main"><div class="c-title">时间</div></div>
+        <div class="c-extra">${esc(o.date || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}${o.endDate && o.endDate !== o.date ? '（至 ' + esc(o.endDate) + '）' : ''}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">订单号</div></div><div class="c-extra mono">${esc(o.orderId)}</div></div>
+      ${o.cardTypeName ? `<div class="cell"><div class="c-main"><div class="c-title">结算</div></div><div class="c-extra">${esc(o.cardTypeName)} · 实付 ¥0</div></div>` : ''}
     </div>
+
     <div class="actions">
-      <button class="btn" id="act-door" ${live && hasDev ? '' : 'disabled'}>开门</button>
-      <button class="btn ghost" id="act-checkin" ${live ? '' : 'disabled'}>签到</button>
-      <button class="btn ghost" id="act-light" ${live ? '' : 'disabled'}>开灯</button>
-      <button class="btn danger" id="act-leave" ${live ? '' : 'disabled'}>退座</button>
+      <button class="btn" id="act-checkin" ${live ? '' : 'disabled'}>提前入座</button>
+      <button class="btn ghost" id="act-door" ${live && hasDev ? '' : 'disabled'}>开门</button>
+      <button class="btn ghost" id="act-leave" ${live ? '' : 'disabled'}>退座</button>
+      <button class="btn danger" id="act-cancel" ${canCancel ? '' : 'disabled'}>取消预约</button>
     </div>
     <div id="act-out"></div>
+    ${cancelWhy ? `<div class="tip" style="padding-top:10px">取消预约：${esc(cancelWhy)}</div>` : ''}
+
     <div class="group">
-      <div class="group-hd"><b>现在能做什么</b><small class="subtle">按 orderStatus 判断</small></div>
-      ${live
-        ? `<div class="tip" style="padding:6px 16px 12px">
-             <b>已支付 / 使用中</b>：可以用上面四个按钮。<br>
-             <b>开门</b>是纯服务端指令——请求体里 <span class="mono">lat/lon</span> 由客户端提交，服务端只比「报的位置离门店够不够近」，
-             容差 <span class="mono">storeDistanceStipulation</span> = 1km，所以本页直接提交<b>订单自带的门店坐标</b>（距离≈0）。
-             1km 的容差远大于蓝牙范围，这也是这个锁能在 1km 外开的原因。<br>
-             <b>签到</b>（<span class="mono">/seat/order/immediatelySeat</span>）同一套距离校验，成功后订单变<b>「使用中」</b>、座位变<b>占用中</b>。<br>
-             <b>开灯</b>（<span class="mono">/seat/order/openLight</span>）实测<b>没跑通</b>：订单「已支付」时返回 <span class="mono">100862 当前订单未在进行中</span>，<br>
-             订单「使用中」时则恒定返回 <span class="mono">code 500</span>（空 msg），换各种参数都一样。<br>
-             实际上灯是<b>「签到」点亮的</b>、<b>「退座」关掉的</b> —— 所以想开灯，点签到就够了。<br>
-             <b>退座不可逆</b>：立刻结束本次学习、释放座位，已扣的月卡天数<b>不退回</b>。
-           </div>`
-        : `<div class="tip" style="padding:6px 16px 12px">
-             ${Number(o.orderStatus) === 1
-               ? '这一单还是<b>待支付</b>，不能开门。先回「选座」用月卡抵扣，或去原 App 支付。'
-               : '这一单已<b>结束</b>，座位已释放，不能再开门 / 签到 / 开灯。重新预约后才能操作。'}
-             ${!hasDev ? '<br>另外这一单没有返回开门设备（<span class="mono">buttonNames</span> 为空）。' : ''}
-           </div>`}
+      <div class="group-hd"><b>门店与设备</b></div>
+      ${o.advanceOpeningTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">可提前开门</div></div><div class="c-extra">${esc(String(o.advanceOpeningTime))} 分钟</div></div>` : ''}
+      ${hasDev ? `<div class="cell"><div class="c-main"><div class="c-title">门锁</div>
+        <div class="c-desc mono">${esc(o.devices[0].deviceId || '—')} · ${esc(o.devices[0].manufacturerCode || '')}</div></div>
+        <div class="c-extra"><span class="pill blue">${esc(o.devices[0].buttonName || '开门')}</span></div></div>`
+        : '<div class="tip" style="padding:6px 16px 12px">这一单没有返回开门设备</div>'}
+      <div class="cell"><div class="c-main"><div class="c-title">灯光</div>
+        <div class="c-desc">由「提前入座」点亮、「退座」关闭</div></div>
+        <div class="c-extra">${o.lightOpenStatus === 1 ? '已开' : '已关'}</div></div>
     </div>
-    <div class="group">
-      <div class="group-hd"><b>预约信息</b></div>
-      <div class="cell"><div class="c-main"><div class="c-title">位置</div></div><div class="c-extra">${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">时间</div></div><div class="c-extra">${esc(o.date || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}${o.endDate && o.endDate !== o.date ? '（至 ' + esc(o.endDate) + '）' : ''}</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">订单号</div></div><div class="c-extra mono">${esc(o.orderId)}</div></div>
-      ${o.cardTypeName ? `<div class="cell"><div class="c-main"><div class="c-title">结算方式</div></div><div class="c-extra">${esc(o.cardTypeName)}${o.paymentMethod != null ? ' · paymentMethod=' + esc(String(o.paymentMethod)) : ''}</div></div>` : ''}
-      ${o.expiredTime ? `<div class="cell"><div class="c-main"><div class="c-title">支付截止</div><div class="c-desc">下单后 5 分钟未支付会失效（字段 expiredTime）</div></div><div class="c-extra">${esc(o.expiredTime)}</div></div>` : ''}
-    </div>
+
     ${o.storeManagerUrl ? `
     <div class="group">
-      <div class="group-hd"><b>店长码</b><small class="subtle">长按可保存 · 转让 / 找店长用</small></div>
+      <div class="group-hd"><b>店长码</b><small class="subtle">长按保存</small></div>
       <div class="cell" style="justify-content:center"><img class="oqrc" src="${esc(o.storeManagerUrl)}" alt="店长码"></div>
     </div>` : ''}
+
     <div class="group">
-      <div class="group-hd"><b>开门设备</b></div>
-      ${(o.devices && o.devices.length) ? o.devices.map(d => `
-        <div class="cell"><div class="c-main"><div class="c-title">${esc(d.buttonName || '开门')}</div>
-          <div class="c-desc mono">deviceId ${esc(d.deviceId || '—')} · ${esc(d.manufacturerCode || '')}</div></div></div>`).join('')
-        : '<div class="tip">这个订单没有返回开门设备</div>'}
-      ${(o.wifiNames && o.wifiNames.length) ? `<div class="cell"><div class="c-main"><div class="c-title">到店要连的 WiFi</div>
-        <div class="c-desc mono">${o.wifiNames.map(esc).join('  /  ')}</div></div><div class="c-extra"><span class="pill blue">开门前置</span></div></div>` : ''}
-      ${o.advanceOpeningTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">可提前开门</div>
-        <div class="c-desc">开始前 ${esc(String(o.advanceOpeningTime))} 分钟内才能开门（advanceOpeningTime）</div></div>
-        <div class="c-extra">${esc(String(o.advanceOpeningTime))} 分钟</div></div>` : ''}
-      ${o.longestReservationTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">还能续多久</div>
-        <div class="c-desc">本单最长可预约 ${Math.round(o.longestReservationTime / 60 * 10) / 10} 小时${o.advanceContinueTime != null ? ` · 需提前 ${esc(String(o.advanceContinueTime))} 分钟续` : ''}</div></div>
-        <div class="c-extra"><span class="pill mute">续约回原 App</span></div></div>` : ''}
-      <div class="tip">
-        <b>开门 / 开灯 / 退座都在本页可以直接做</b>（上面那排按钮），不用回原 App。<br>
-        实测更正：HAR 里那两次 <span class="mono">code 317 当前距离过大</span> 不是因为要蓝牙，
-        而是因为提交的坐标是 <span class="mono">43.86/87.54</span>（乌鲁木齐）而这家店真实坐标是
-        <span class="mono">${esc(String(o.lat ?? '—'))}/${esc(String(o.lon ?? '—'))}</span>，差了约 2000km。
-        服务端只比「提交点 ↔ 门店点」的直线距离，容差 1km —— 所以提交门店自己的坐标就能通过。
-      </div>
+      <div class="cell tap" id="tech-toggle">
+        <div class="c-main"><div class="c-title">技术细节</div>
+          <div class="c-desc">状态码与接口原始返回</div></div>
+        <span class="chev" id="tech-chev"></span></div>
     </div>
-    <div class="group">
-      <div class="group-hd"><b>原始返回</b><small class="subtle">排查问题用</small></div>
-      <pre class="raw">${esc(JSON.stringify(o, null, 2))}</pre>
+    <div id="tech-panel" style="display:none">
+      <div class="group">
+        <div class="cell"><div class="c-main"><div class="c-title">orderStatus</div></div>
+          <div class="c-extra"><span class="mono">${esc(String(o.orderStatus))} · conf=${esc(si.conf || '?')}</span></div></div>
+        ${si.hint ? `<div class="cell" style="display:block"><div class="c-desc">${esc(si.hint)}</div></div>` : ''}
+        ${(() => { const extra = []; if (o.longestReservationTime != null) extra.push(`最长可约 ${Math.round(o.longestReservationTime / 60 * 10) / 10} 小时`); if (o.advanceContinueTime != null) extra.push(`续约需提前 ${o.advanceContinueTime} 分钟`); if (o.paymentMethod != null) extra.push(`paymentMethod=${o.paymentMethod}`); return extra.length ? `<div class="cell" style="display:block"><div class="subtle">${esc(extra.join(' · '))}</div></div>` : ''; })()}
+        <pre class="raw" style="margin:0 16px 12px">${esc(JSON.stringify(o, null, 2))}</pre>
+      </div>
     </div>
   </div>`;
 };
@@ -895,37 +874,55 @@ PAGES.me = () => {
   const s = state.status || {};
   const t = s.token || {};
   const alive = s.tokenAlive;
-  const days = t.daysLeft;
-  const tone = alive === true ? (days > 7 ? 'ok' : 'warn') : 'bad';
+  const c = s.primaryCard || null;
+  const tone = alive === true ? ((t.daysLeft ?? 99) > 7 ? 'ok' : 'warn') : 'bad';
+  const others = (s.cards || []).filter(x => !c || x.userCardId !== c.userCardId);
   return `
   <div class="page-inner">
     <div class="group" style="margin-top:12px">
-      <div class="cell" style="min-height:66px">
+      <div class="cell" style="min-height:64px">
         <div class="c-main">
-          <div class="c-title">登录凭证（JWT token）</div>
-          <div class="c-desc">${alive === true ? '探活正常，可以直接下单' : alive === false ? '探活失败：' + esc(s.probeMsg || '') : '检测中…'}</div>
+          <div class="c-title">${c ? esc(c.name) : '月卡'}</div>
+          <div class="c-desc">${c ? (c.usable ? '可用于 0 元门店抵扣' : esc(c.statusLabel)) : (s.cardMsg ? esc(s.cardMsg) : '读取中…')}</div>
         </div>
-        <span class="pill ${tone}">${alive === true ? (days > 7 ? '正常' : '将过期') : alive === false ? '已失效' : '…'}</span>
+        <span class="pill ${c ? (c.usable ? 'ok' : 'mute') : 'mute'}">${c ? esc(c.statusLabel) : '—'}</span>
       </div>
-      <div class="cell"><div class="c-main"><div class="c-title">有效期至</div></div><div class="c-extra">${esc(t.expStr || '—')}</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">剩余</div></div><div class="c-extra">${days == null ? '—' : days + ' 天'}</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">userId</div></div><div class="c-extra mono">${esc(t.myUserId || '—')}</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">来源</div></div><div class="c-extra">${esc(s.tokenSource || '—')}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">剩余</div></div>
+        <div class="c-extra"><b class="money">${c && c.remain != null ? esc(String(c.remain)) + ' ' + esc(c.remainUnit) : '—'}</b></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">有效期至</div>
+        <div class="c-desc">月卡自己的有效期</div></div>
+        <div class="c-extra">${c ? esc(c.expiredTime) : '—'}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">0 元覆盖</div></div>
+        <div class="c-extra">${s.zeroCount ?? '—'} 家 · ${s.cities ?? '—'} 城</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">月卡抵扣</div></div>
+        <div class="c-extra"><span class="pill ${s.allowCardSettle ? 'ok' : 'mute'}">${s.allowCardSettle ? '已开启' : '已关闭'}</span></div></div>
+    </div>
+
+    ${others.length ? `
+    <div class="group">
+      <div class="group-hd"><b>其它卡券</b></div>
+      ${others.map(x => `<div class="cell"><div class="c-main"><div class="c-title">${esc(x.name)}</div>
+        <div class="c-desc">${esc(x.statusLabel)}${x.expiredTime ? ' · 至 ' + esc(x.expiredTime) : ''}</div></div>
+        <div class="c-extra">${x.remain != null ? esc(String(x.remain)) + ' ' + esc(x.remainUnit) : '—'}</div></div>`).join('')}
+    </div>` : ''}
+
+    <div class="group">
       <div class="cell tap" id="tok-toggle">
-        <div class="c-main"><div class="c-title link">更新 JWT token</div>
-          <div class="c-desc">就在这一页换，不用跳页：扫本机抓包一键提取，或直接粘贴</div></div>
+        <div class="c-main"><div class="c-title">登录凭证</div>
+          <div class="c-desc">${alive === true ? '探活正常' : alive === false ? '已失效：' + esc(s.probeMsg || '') : '检测中…'}
+            · token 有效至 ${esc(t.expStr || '—')}</div></div>
         <span class="chev" id="tok-chev"></span></div>
     </div>
     <div id="tok-panel" style="display:none">
       <div class="group">
-        <div class="group-hd"><b>① 从抓包文件一键更新</b><span id="har-refresh" class="tap-link">重新扫描</span></div>
+        <div class="group-hd"><b>从抓包文件一键更新</b><span id="har-refresh" class="tap-link">重新扫描</span></div>
         <div id="har-list"></div>
       </div>
       <div class="group">
-        <div class="group-hd"><b>② 或者粘贴</b><span>整段 HAR 也行</span></div>
+        <div class="group-hd"><b>或者粘贴</b><span>整段 HAR 也行</span></div>
         <div class="cell" style="display:block">
-          <textarea class="raw" id="tok-paste" placeholder="粘贴 eyJ... 开头的 JWT，或直接把 HAR 里的一段内容粘进来"></textarea>
-          <div class="subtle" style="margin-top:8px">UA 会沿用当前值；换了微信版本请用「① 抓包文件」方式，它会连 UA 一起更新。</div>
+          <textarea class="raw" id="tok-paste" placeholder="粘贴 eyJ... 开头的 JWT，或把 HAR 里的一段粘进来"></textarea>
+          <div class="subtle" style="margin-top:8px">UA 会沿用当前值；换了微信版本请用上面的抓包方式，它会连 UA 一起更新。</div>
           <div class="btn-row" style="padding:12px 0 0"><button class="btn" id="tok-save">校验并保存</button></div>
         </div>
       </div>
@@ -933,55 +930,49 @@ PAGES.me = () => {
     </div>
 
     <div class="group">
-      <div class="group-hd"><b>月卡 0 元覆盖</b><span>实时取自 /card/available-stores</span></div>
-      <div class="cell"><div class="c-main"><div class="c-title">覆盖门店</div></div><div class="c-extra">${s.zeroCount ?? '—'} 家 · ${s.cities ?? '—'} 个城市</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">userCardId</div></div><div class="c-extra mono" style="max-width:170px;overflow:hidden;text-overflow:ellipsis">${esc(s.cardId || '—')}</div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">月卡抵扣</div><div class="c-desc">扣月卡 1 天，实付 ¥0，订单直接变「已支付」</div></div>
-        <div class="c-extra"><span class="pill ${s.allowCardSettle ? 'ok' : 'mute'}">${s.allowCardSettle ? '已开启' : '已关闭'}</span></div></div>
+      <div class="cell tap" id="face-toggle">
+        <div class="c-main"><div class="c-title">人脸门禁</div>
+          <div class="c-desc">传一次正脸照，到门口刷脸就不用点开门了</div></div>
+        <span class="chev" id="face-chev"></span></div>
     </div>
-
-    <div class="group">
-      <div class="group-hd"><b>人脸门禁</b><span>传一次，到门口刷脸就行</span></div>
-      <div class="cell" style="display:block">
-        <div class="facedrop" id="face-drop">
-          <img id="face-prev" alt="" style="display:none">
-          <div id="face-hint">点这里选一张<b>正脸清晰</b>的照片（手机可拍照）<br>会自动裁成方图再传</div>
+    <div id="face-panel" style="display:none">
+      <div class="group">
+        <div class="cell" style="display:block">
+          <div class="facedrop" id="face-drop">
+            <img id="face-prev" alt="" style="display:none">
+            <div id="face-hint">点这里选一张<b>正脸清晰</b>的照片（手机可拍照）<br>会自动裁成方图再传</div>
+          </div>
+          <input type="file" id="face-file" accept="image/*" style="display:none">
+          <div class="btn-row" style="padding:12px 0 0">
+            <button class="btn" id="face-go" disabled>上传并建立人脸档</button>
+          </div>
+          <div class="subtle" style="margin-top:8px">重复上传会<b>覆盖旧的脸</b>；平台没有删除接口，也没有「查是否已建过脸」的接口。</div>
         </div>
-        <input type="file" id="face-file" accept="image/*" style="display:none">
-        <div class="btn-row" style="padding:12px 0 0">
-          <button class="btn" id="face-go" disabled>上传并建立人脸档</button>
-        </div>
-        <div class="subtle" style="margin-top:8px">
-          走 <span class="mono">/store/home/page/upload/file</span> 传到平台 OSS，再调
-          <span class="mono">/user-face/create</span> 建档 —— 两条都是从你抓的「上传人脸」包里逆出来的。<br>
-          平台<b>没有</b>「查是否已建过脸」的接口，所以这里显示不了状态；重复上传会覆盖旧的脸。
-        </div>
+        <div id="face-out"></div>
       </div>
-      <div id="face-out"></div>
     </div>
 
     <div class="group">
-      <div class="group-hd"><b>现在已经能做的</b></div>
-      <div class="cell"><div class="c-main"><div class="c-title">开门</div><div class="c-desc">走服务端 HTTP 下发（不是蓝牙）。提交门店自带坐标即可过 1km 距离判定</div></div><div class="c-extra"><span class="pill ok">预约详情页</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">到店签到 / 立即入座</div><div class="c-desc">immediatelySeat：同一套 1km 校验，成功后订单变「使用中」、座位变占用中</div></div><div class="c-extra"><span class="pill ok">预约详情页</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">开灯 / 关灯</div><div class="c-desc">openLight 实测没跑通（有活跃订单时恒 code 500）。灯实际由<b>签到点亮</b>、<b>退座关掉</b> —— 状态看 lightOpenStatus</div></div><div class="c-extra"><span class="pill bad">未跑通</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">退座（结束本次学习）</div><div class="c-desc">finishStudy：立刻释放座位，orderStatus → 8；已扣月卡天数不退回</div></div><div class="c-extra"><span class="pill ok">不可逆</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">看占座人 + 该座时段</div><div class="c-desc">座位图上点占用的座位：头像 + querySeatSpareTime 给出的占用区间</div></div><div class="c-extra"><span class="pill ok">选座页</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">上传人脸建档</div><div class="c-desc">upload/file → user-face/create；传完到门禁机刷脸，不用在网页点开门</div></div><div class="c-extra"><span class="pill ok">这一页</span></div></div>
+      <div class="cell tap" id="cap-toggle">
+        <div class="c-main"><div class="c-title">能做什么 / 不能做什么</div>
+          <div class="c-desc">接口实测结论一览</div></div>
+        <span class="chev" id="cap-chev"></span></div>
+    </div>
+    <div id="cap-panel" style="display:none">
+      <div class="group">
+        <div class="cell"><div class="c-main"><div class="c-title">开门</div><div class="c-desc">服务端 HTTP 下发，不是蓝牙</div></div><div class="c-extra"><span class="pill ok">可用</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">提前入座</div><div class="c-desc">订单转「使用中」，灯自动亮</div></div><div class="c-extra"><span class="pill ok">可用</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">退座</div><div class="c-desc">立刻释放座位，天数不退</div></div><div class="c-extra"><span class="pill ok">可用</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">取消预约</div><div class="c-desc">只对「已支付」的单有效</div></div><div class="c-extra"><span class="pill ok">可用</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">开灯 / 关灯</div><div class="c-desc">接口实测返回 code 500，靠入座点亮</div></div><div class="c-extra"><span class="pill bad">未跑通</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">微信支付</div><div class="c-desc">要客户端与商户号，0 元店用不上</div></div><div class="c-extra"><span class="pill mute">回原 App</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">别人昵称 / 别人订单</div><div class="c-desc">只有头像和 userId，无查询接口</div></div><div class="c-extra"><span class="pill mute">无接口</span></div></div>
+        <div class="cell"><div class="c-main"><div class="c-title">补差价升级 / 转让</div><div class="c-desc">平台无入口</div></div><div class="c-extra"><span class="pill mute">无入口</span></div></div>
+      </div>
     </div>
 
-    <div class="group">
-      <div class="group-hd"><b>还是做不到的</b></div>
-      <div class="cell"><div class="c-main"><div class="c-title">取消订单 / 退卡</div><div class="c-desc">平台没有暴露取消接口（HAR 53 个接口 + 141 个候选路由全 0 命中）</div></div><div class="c-extra"><span class="pill mute">回原 App</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">微信支付</div><div class="c-desc">要客户端 + 商户号；0 元店用不上</div></div><div class="c-extra"><span class="pill mute">回原 App</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">查别人昵称 / 别人订单</div><div class="c-desc">只有 userPhoto + userId，没有 getUserInfo 这类只读接口（实测全 404）</div></div><div class="c-extra"><span class="pill mute">无接口</span></div></div>
-      <div class="cell"><div class="c-main"><div class="c-title">补差价升级 / 自助转让</div><div class="c-desc">userUpgrade 返回「该方法已废弃」；转让只有店长人工流程</div></div><div class="c-extra"><span class="pill mute">无入口</span></div></div>
-    </div>
-
-    <div class="notice red" style="margin-bottom:18px">
-      <b>风险自担</b>：这是对你自己账号的面板。只监听 <span class="mono">127.0.0.1</span>，不要改成 0.0.0.0、不要把 token 给别人 —— token 等于你 <span class="mono">${
-        esc(state.status?.token?.myUserId || '')}</span> 的实名账号。<br>
-      抵扣不可撤销：平台没有取消 / 退卡接口，扣掉的 1 天要不回来。
+    <div class="notice gray" style="margin-bottom:18px">
+      只监听 <span class="mono">127.0.0.1</span>，别把 token 给别人 —— 它等于你 <span class="mono">${esc(t.myUserId || '')}</span> 的实名账号。
     </div>
   </div>`;
 };
@@ -1383,49 +1374,51 @@ async function paintLive(el) {
 AFTER.order = (el) => {
   const o = state.orderDetail; if (!o) return;
   const out = el.querySelector('#act-out');
-  const note = (cls, html) => { if (out) out.innerHTML = `<div class="notice ${cls}" style="margin:10px 12px 0">${html}</div>`; };
   const busy = (btn, txt) => { const old = btn.textContent; btn.disabled = true; btn.textContent = txt; return () => { btn.disabled = false; btn.textContent = old; }; };
   // 做完动作后回读服务端真值再重渲染这一页，避免界面停在旧状态
   const refresh = async (cls, html) => {
     try {
-      const q = await jget('/api/orders');
-      const fresh = (q.orders || []).find(x => x.orderId === o.orderId);
-      if (fresh) state.orderDetail = fresh;
+      const d = await jget('/api/order?orderId=' + encodeURIComponent(o.orderId));
+      if (d && d.order) state.orderDetail = d.order;
     } catch { }
     render('order', 'none');
-    const p = viewport.querySelector('.page');
-    const o2 = p && p.querySelector('#act-out');
+    const p2 = viewport.querySelector('.page');
+    const o2 = p2 && p2.querySelector('#act-out');
     if (o2) o2.innerHTML = `<div class="notice ${cls}" style="margin:10px 12px 0">${html}</div>`;
+  };
+
+  // 「技术细节」折叠
+  const tt = el.querySelector('#tech-toggle'), tp = el.querySelector('#tech-panel');
+  if (tt && tp) tt.onclick = () => {
+    const open = tp.style.display === 'none';
+    tp.style.display = open ? 'block' : 'none';
+    const c = el.querySelector('#tech-chev'); if (c) c.classList.toggle('down', open);
   };
 
   const door = el.querySelector('#act-door');
   const checkin = el.querySelector('#act-checkin');
-  const light = el.querySelector('#act-light');
   const leave = el.querySelector('#act-leave');
+  const cancel = el.querySelector('#act-cancel');
 
   if (checkin && !checkin.disabled) checkin.onclick = async () => {
     if (!await confirmDialog({
-      title: '到店签到 · 立即入座',
-      body: `给这一单做「立即入座」？<br><br>
-        接口 <span class="mono">/seat/order/immediatelySeat</span>，和开门同一套距离校验（1km）。
-        成功后这一单会从「已支付」变成<b>「使用中」</b>，座位立刻显示成<b>占用中</b>。<br><br>
-        ⚠ 这一步等于告诉平台「我人到店坐下了」，座位被别人抢不掉，但你也<b>更难退</b>（退座仍要扣掉那 1 天）。`,
-      ok: '签到', danger: true,
+      title: '提前入座',
+      body: `现在就算「入座」吗？<br><br>成功后这一单变成<b>使用中</b>，座位显示为占用中，灯会亮。<br><br>
+        ⚠ 退座时不会退回已扣的月卡天数。`,
+      ok: '提前入座', danger: true,
     })) return;
-    const done = busy(checkin, '签到中…');
+    const done = busy(checkin, '入座中…');
     const r = await jpost('/api/checkin', { orderId: o.orderId, confirm: true });
     done();
     await refresh(r.ok ? 'green' : 'red',
       `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
-       <div class="mono" style="margin-top:6px;font-size:12px">提交 lat=${esc(String(r.sent?.lat))} lon=${esc(String(r.sent?.lon))} wifi=${esc(String(r.sent?.wifiName || '（空）'))} · innerCode=${esc(String(r.innerCode))}</div>`);
+       <div class="mono" style="margin-top:6px;font-size:12px">lat=${esc(String(r.sent?.lat))} lon=${esc(String(r.sent?.lon))} · code=${esc(String(r.innerCode))}</div>`);
   };
 
   if (door && !door.disabled) door.onclick = async () => {
     if (!await confirmDialog({
-      title: '开门 · 真实硬件指令',
-      body: `给「${esc(o.storeName || '')}」的门锁下发开门指令？<br><br>
-        服务端拿<b>提交的 lat/lon</b> 和门店坐标比直线距离，容差 1km。本工具提交的是订单自带的门店坐标，
-        所以距离≈0。通过后门锁才会动作；设备离线或没到可开门时间会被拒。`,
+      title: '开门',
+      body: `给「${esc(o.storeName || '')}」的门锁下发开门指令？<br><br>门锁在线且到了可开门时间才会动作。`,
       ok: '开门', danger: true,
     })) return;
     const done = busy(door, '开门中…');
@@ -1433,36 +1426,39 @@ AFTER.order = (el) => {
     done();
     await refresh(r.ok ? 'green' : 'red',
       `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
-       <div class="mono" style="margin-top:6px;font-size:12px">提交 lat=${esc(String(r.sent?.lat))} lon=${esc(String(r.sent?.lon))} · deviceId ${esc(String(r.sent?.deviceId || '—'))} · data.code=${esc(String(r.code))}</div>`);
-  };
-
-  if (light && !light.disabled) light.onclick = async () => {
-    if (!await confirmDialog({
-      title: '开灯 / 关灯',
-      body: `下发灯光指令？<br><br><span class="mono">/seat/order/openLight</span> 是同一个接口，开还是关由服务端定。
-        当前 <span class="mono">lightOpenStatus = ${esc(String(o.lightOpenStatus ?? '—'))}</span>（0 = 未开）。`,
-      ok: '下发', danger: false,
-    })) return;
-    const done = busy(light, '下发中…');
-    const r = await jpost('/api/light', { orderId: o.orderId, confirm: true });
-    done();
-    await refresh(r.ok ? 'green' : 'red',
-      `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
-       <div class="mono" style="margin-top:6px;font-size:12px">lightOpenStatus ${esc(String(r.lightBefore))} → ${esc(String(r.lightAfter))}</div>`);
+       <div class="mono" style="margin-top:6px;font-size:12px">deviceId ${esc(String(r.sent?.deviceId || '—'))} · code=${esc(String(r.code))}</div>`);
   };
 
   if (leave && !leave.disabled) leave.onclick = async () => {
     if (!await confirmDialog({
-      title: '退座 · 不可逆',
-      body: `确定要退座？<br><br>会<b>立刻结束本次学习</b>并把座位释放掉，预约的结束时间被截断成现在。<br><br>
-        ⚠ <b>已扣的月卡天数不会退回</b>——卡是在「结算」那一步扣的，退座只结束使用。`,
+      title: '退座',
+      body: '提前结束这次学习？<br><br>座位会立刻释放，预约结束时间被截断成现在。<br><br>⚠ <b>已扣的月卡天数不退回</b>。',
       ok: '退座', danger: true,
     })) return;
-    if (!await confirmDialog({ title: '再确认一次', body: '真的要退座吗？这一步没法撤销。', ok: '确认退座', danger: true })) return;
+    if (!await confirmDialog({ title: '再确认一次', body: '退座没法撤销，确定吗？', ok: '确认退座', danger: true })) return;
     const done = busy(leave, '退座中…');
     const r = await jpost('/api/leave', { orderId: o.orderId, confirm: true });
     done();
     await refresh(r.ok ? 'green' : 'red', `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}`);
+  };
+
+  if (cancel && !cancel.disabled) cancel.onclick = async () => {
+    const need = (state.cancelRule && state.cancelRule.aheadCancelBookingMinutes) || 30;
+    const deduct = (state.cancelRule && state.cancelRule.bookingAheadCloseDeductMinutes) || 30;
+    if (!await confirmDialog({
+      title: '取消预约',
+      body: `取消这一单，座位立刻释放？<br><br>
+        门店要求<b>提前 ${esc(String(need))} 分钟</b>取消才算无损；不足会按违约扣减 ${esc(String(deduct))} 分钟。<br><br>
+        实测：<b>月卡天数不退还</b>。`,
+      ok: '取消预约', danger: true,
+    })) return;
+    const done = busy(cancel, '取消中…');
+    const r = await jpost('/api/cancel', { orderId: o.orderId, confirm: true });
+    done();
+    const lead = r.leadMin == null ? '' : ` · 离开车 ${r.leadMin} 分钟`;
+    await refresh(r.ok ? 'green' : 'red',
+      `${r.ok ? '✅' : '❌'} ${esc(r.msg || r.message || '')}
+       <div class="mono" style="margin-top:6px;font-size:12px">code=${esc(String(r.code))} · orderStatus ${esc(String(r.before?.orderStatus))} → ${esc(String(r.after?.orderStatus))}${esc(lead)}${r.penaltyNote ? '<br>' + esc(r.penaltyNote) : ''}</div>`);
   };
 };
 
@@ -1723,6 +1719,19 @@ function shrinkToSquare(file, size = 720, q = 0.88) {
 }
 
 AFTER.me = (el) => {
+  /* —— 通用折叠（人脸 / 能力清单）—— */
+  const fold = (tid, pid, cid) => {
+    const t = el.querySelector(tid), p = el.querySelector(pid), c = cid ? el.querySelector(cid) : null;
+    if (!t || !p) return;
+    t.onclick = () => {
+      const open = p.style.display === 'none';
+      p.style.display = open ? 'block' : 'none';
+      if (c) c.classList.toggle('down', open);
+    };
+  };
+  fold('#face-toggle', '#face-panel', '#face-chev');
+  fold('#cap-toggle', '#cap-panel', '#cap-chev');
+
   /* —— 内嵌 JWT 面板 —— */
   const tg = el.querySelector('#tok-toggle'), pn = el.querySelector('#tok-panel'), ch = el.querySelector('#tok-chev');
   if (tg && pn) {
@@ -1863,7 +1872,7 @@ function paintTabBadge(s) {
 
   // 顶部安全区：给 viewport 上的页面留出底部空间
   resetTimes();
-  go('stores');
+  go('orders');
 
   const st = await jget('/api/status');
   if (st.ok) {
