@@ -1,0 +1,1881 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EDEDED">
+<title>王知之自习室 · 选座下单助手</title>
+<style>
+/* ==========================================================================
+   王知之自习室 · 选座下单助手
+   风格对标 微信小程序 / WeUI 8.x —— 色板、圆角、发丝线、点按反馈全部照搬，
+   不引任何外部依赖。
+   ========================================================================== */
+:root{
+  /* WeUI 色板 */
+  --brand:#07C160;          /* WeChat Green */
+  --brand-dark:#06AD56;     /* :active */
+  --brand-dis:#9EDFB8;      /* disabled */
+  --warn:#FA9D3B;
+  --price:#FA5151;
+  --link:#576B95;           /* WeChat link blue */
+  --page:#EDEDED;           /* page background */
+  --card:#FFFFFF;
+  --fill:#F7F7F7;           /* input / search fill */
+  --ink:rgba(0,0,0,.9);
+  --ink-2:rgba(0,0,0,.55);
+  --ink-3:rgba(0,0,0,.3);
+  --ink-4:rgba(0,0,0,.15);
+  --line:rgba(0,0,0,.08);
+  --line-2:rgba(0,0,0,.12);
+  /* 座位图 */
+  --seat-free:#07C160;
+  --seat-taken:#C8C9CC;
+  --seat-mine:#576B95;
+  --seat-sel:#FA9D3B;
+  /* 尺寸 */
+  --nav-h:44px;
+  --tab-h:56px;
+  --r:10px;                 /* 卡片圆角（WeChat 新版用 8–12） */
+  --r-sm:6px;
+  --pad:16px;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;height:100%}
+body{
+  font-family:var(--font);
+  font-size:17px;line-height:1.4;color:var(--ink);
+  background:#DEDEDE;
+  display:flex;align-items:center;justify-content:center;
+  overflow:hidden;
+}
+button{font-family:inherit;cursor:pointer;border:0;background:none;padding:0;color:inherit}
+input{font-family:inherit}
+img{display:block}
+
+/* ---------- 桌面端：手机壳 ---------- */
+.phone{
+  position:relative;width:min(414px,100vw);height:min(896px,100vh);
+  background:var(--page);overflow:hidden;
+  display:flex;flex-direction:column;
+  box-shadow:0 24px 70px rgba(0,0,0,.22),0 2px 10px rgba(0,0,0,.08);
+  border-radius:44px;
+}
+@media (min-width:521px) and (min-height:901px){
+  body{background:radial-gradient(1200px 700px at 18% 8%,#F2F6F3 0%,transparent 60%),
+              radial-gradient(1000px 620px at 88% 92%,#EAF2FF 0%,transparent 58%),
+              linear-gradient(160deg,#E9EBEE 0%,#DDE1E6 100%)}
+}
+@media (max-width:520px),(max-height:900px){
+  .phone{width:100vw;height:100vh;border-radius:0;box-shadow:none}
+  body{background:var(--page)}
+}
+
+/* ---------- iOS 状态栏 ---------- */
+.statusbar{
+  height:44px;flex:none;display:flex;align-items:center;justify-content:space-between;
+  padding:0 26px 0 30px;font-size:15px;font-weight:600;letter-spacing:.2px;
+  color:#000;background:#fff;user-select:none;
+}
+.sb-right{display:flex;align-items:center;gap:5px}
+
+/* ---------- 导航栏 ---------- */
+.navbar{
+  height:var(--nav-h);flex:none;position:relative;
+  display:flex;align-items:center;justify-content:center;
+  background:#fff;color:#000;
+}
+.navbar::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;
+  background:var(--line);transform:scaleY(.5);transform-origin:0 100%}
+.nav-back{
+  position:absolute;left:0;top:0;height:100%;width:52px;
+  display:flex;align-items:center;justify-content:center;
+}
+.nav-back:active{opacity:.5}
+.nav-title{
+  font-size:17px;font-weight:600;max-width:52%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;
+}
+/* 微信胶囊按钮 */
+.capsule{
+  position:absolute;right:12px;top:50%;transform:translateY(-50%);
+  display:flex;align-items:center;gap:0;height:32px;
+  border:.5px solid var(--line-2);border-radius:16px;background:#fff;
+  padding:0 4px;
+}
+.capsule i{width:34px;height:32px;display:flex;align-items:center;justify-content:center;opacity:.9}
+.dotline{width:.5px;height:18px;background:var(--line-2)}
+
+/* ---------- 滚动区 ---------- */
+.viewport{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;position:relative}
+.page{min-height:100%;animation-fill-mode:both}
+.page[data-anim="push"]{animation:wz-in .26s cubic-bezier(.32,.72,0,1)}
+.page[data-anim="pop"]{animation:wz-back .26s cubic-bezier(.32,.72,0,1)}
+@keyframes wz-in{from{transform:translateX(28%);opacity:.6}to{transform:none;opacity:1}}
+@keyframes wz-back{from{transform:translateX(-22%);opacity:.6}to{transform:none;opacity:1}}
+.page-inner{padding-bottom:24px}
+
+/* ---------- 分组卡片（WeUI cells）---------- */
+.group{
+  background:var(--card);margin:12px;border-radius:var(--r);
+  overflow:hidden;position:relative;
+}
+.group-hd{
+  display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+  padding:14px var(--pad) 6px;font-size:14px;color:var(--ink-2);
+}
+.group-hd b{font-weight:400;font-size:14px;color:var(--ink-2)}
+.group-hd small{font-size:13px}
+
+.cell{
+  display:flex;align-items:center;gap:10px;
+  min-height:52px;padding:11px var(--pad);position:relative;background:var(--card);
+}
+.cell::after{content:"";position:absolute;left:var(--pad);right:0;bottom:0;height:1px;
+  background:var(--line);transform:scaleY(.5);transform-origin:0 100%}
+.cell:last-child::after,.cell:only-child::after{display:none}
+.cell.tap:active{background:#ECECEC}
+.c-main{flex:1;min-width:0}
+.c-title{font-size:17px;color:var(--ink);overflow:hidden;text-overflow:ellipsis}
+.c-desc{font-size:14px;color:var(--ink-2);margin-top:3px;line-height:1.35;
+  overflow:hidden;text-overflow:ellipsis}
+.c-extra{font-size:17px;color:var(--ink-2);flex:none;max-width:52%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.chev{flex:none;width:8px;height:8px;border-right:1.6px solid var(--ink-3);
+  border-bottom:1.6px solid var(--ink-3);transform:rotate(-45deg)}
+.subtle{color:var(--ink-3)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+  letter-spacing:-.2px;word-break:break-all}
+.raw{
+  margin:0;padding:14px var(--pad);font-size:12px;line-height:1.5;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--ink-2);background:#FAFAFA;max-height:420px;overflow:auto;
+  white-space:pre-wrap;word-break:break-all;
+}
+.money{color:var(--price)}
+.money.big{font-size:26px;font-weight:600;color:var(--price)}
+
+/* ---------- 提示条 ---------- */
+.notice{
+  margin:12px;padding:11px 14px;border-radius:var(--r-sm);
+  font-size:14px;line-height:1.55;
+}
+.notice.gray{background:#F2F2F2;color:var(--ink-2)}
+.notice.green{background:#E8F8EF;color:#06864A}
+.notice.red{background:#FDECEC;color:#C93A3A}
+.notice.blue{background:#EDF1F7;color:var(--link)}
+.tip{padding:10px var(--pad) 14px;font-size:13.5px;line-height:1.62;color:var(--ink-2)}
+.tip b{color:var(--ink);font-weight:600}
+
+/* ---------- 标签 / 徽标 ---------- */
+.pill{
+  display:inline-block;flex:none;padding:2px 8px;border-radius:5px;
+  font-size:13px;line-height:1.5;font-weight:500;
+}
+.pill.ok{background:#E8F8EF;color:#06864A}
+.pill.warn{background:#FFF4E5;color:#B26A00}
+.pill.bad{background:#FDECEC;color:#C93A3A}
+.pill.blue{background:#EDF1F7;color:var(--link)}
+.pill.mute{background:#F2F2F2;color:var(--ink-2)}
+.badge{
+  position:absolute;top:5px;left:50%;margin-left:8px;min-width:17px;height:17px;
+  padding:0 5px;border-radius:9px;background:var(--price);color:#fff;
+  font-size:11px;line-height:17px;text-align:center;font-weight:500;
+}
+.green{color:var(--brand)}
+.red{color:var(--price)}
+
+/* ---------- 按钮 ---------- */
+.btn{
+  height:46px;padding:0 22px;border-radius:var(--r);
+  background:var(--brand);color:#fff;font-size:17px;font-weight:500;
+  display:inline-flex;align-items:center;justify-content:center;
+  transition:background .1s;
+}
+.btn:active{background:var(--brand-dark)}
+.btn:disabled{background:var(--brand-dis);cursor:default}
+.btn.block{display:flex;width:100%}
+.btn.danger{background:#FA5151}
+.btn.danger:active{background:#E04343}
+.btn.danger:disabled{background:#F9B5B5}
+.btn.ghost{background:#F2F2F2;color:var(--ink)}
+.btn.ghost:active{background:#E6E6E6}
+.btn.ghost:disabled{background:#F7F7F7;color:var(--ink-3)}
+.btn.mini{height:32px;padding:0 14px;font-size:14px;border-radius:6px}
+.btn-row{display:flex;gap:10px;padding:0 12px}
+.btn-row .btn{flex:1}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:4px 12px 12px}
+.actions .btn{padding:0 8px}
+
+/* ---------- 搜索框 ---------- */
+.search{
+  display:flex;align-items:center;gap:6px;margin:12px;padding:0 12px;
+  height:38px;background:var(--fill);border-radius:9px;
+}
+.search input{
+  flex:1;min-width:0;border:0;background:none;outline:none;
+  font-size:16px;color:var(--ink);
+}
+.search input::placeholder{color:var(--ink-3)}
+.search .clr{
+  width:20px;height:20px;border-radius:50%;background:var(--ink-3);color:#fff;
+  font-size:12px;line-height:20px;text-align:center;flex:none;display:none;
+}
+.search.has .clr{display:block}
+
+/* ---------- 城市 chips ---------- */
+.chips{
+  display:flex;gap:8px;overflow-x:auto;padding:0 12px 12px;
+  scrollbar-width:none;
+}
+.chips::-webkit-scrollbar{display:none}
+.chip{
+  flex:none;padding:6px 14px;border-radius:16px;background:#fff;
+  font-size:14px;color:var(--ink);border:.5px solid var(--line);
+}
+.chip.on{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:500}
+.chip:active{opacity:.7}
+
+/* ---------- 门店列表 ---------- */
+.oshop{display:flex;align-items:center;gap:10px}
+.store-name{font-size:16px}
+.store-addr{font-size:13px}
+#store-list .cell{min-height:64px}
+
+/* ---------- 时段快选 ---------- */
+.picks{display:flex;gap:8px;overflow-x:auto;padding:2px var(--pad) 12px;scrollbar-width:none}
+.picks::-webkit-scrollbar{display:none}
+.pick{
+  flex:none;padding:7px 14px;border-radius:8px;background:var(--fill);
+  font-size:14px;color:var(--ink);border:.5px solid transparent;
+}
+.pick:active{background:#ECECEC}
+.pick.on{background:#E8F8EF;color:#06864A;border-color:#B7E4CC;font-weight:500}
+.inputs{display:flex;gap:10px;padding:0 var(--pad) 12px}
+.inp{flex:1;min-width:0;background:var(--fill);border-radius:9px;padding:7px 10px}
+.inp label{display:block;font-size:11px;color:var(--ink-3);margin-bottom:1px}
+.inp input{
+  width:100%;border:0;background:none;outline:none;font-size:15px;color:var(--ink);
+  padding:0;
+}
+.radio{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--ink)}
+
+/* ---------- 座位图 ---------- */
+.mapwrap{margin:0 12px;background:#fff;border-radius:var(--r);padding:10px;overflow:hidden}
+.room-name{
+  font-size:14px;color:var(--ink-2);padding:2px 4px 8px;display:flex;
+  justify-content:space-between;gap:8px;
+}
+.map{position:relative;width:100%;border-radius:var(--r-sm);overflow:hidden;background:#F5F5F5}
+.map img{width:100%;display:block}
+.seat{
+  position:absolute;display:flex;align-items:center;justify-content:center;
+  border:0;padding:0;border-radius:4px;font-size:10px;font-weight:600;line-height:1;
+  transform:translate(-50%,-50%);overflow:hidden;cursor:pointer;font-family:inherit;
+  box-shadow:0 0 0 1px rgba(0,0,0,.06);
+  color:#fff;
+}
+.seat.free{background:var(--seat-free);opacity:.9}
+.seat.free:active{background:var(--brand-dark);opacity:1}
+.seat.taken{background:var(--seat-taken);color:rgba(0,0,0,.45)}
+.seat.taken:active{filter:brightness(.94)}
+.seat.mine{background:var(--seat-mine)}
+.seat.sel{background:var(--seat-sel);box-shadow:0 0 0 2px #fff,0 0 0 3.5px var(--seat-sel)}
+/* 有头像的占用座：头像是「方形」的，白描边把它从底图上托出来（小程序里也是这么画的） */
+.seat.hasav{
+  background:#EDEDED;color:transparent;
+  box-shadow:0 0 0 1.5px #fff,0 0 0 2.5px rgba(0,0,0,.22);
+}
+.seat.sel.hasav{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--seat-sel)}
+.seat.mine.hasav{box-shadow:0 0 0 1.5px #fff,0 0 0 2.5px var(--seat-mine)}
+/* 头像：绝对铺满整个座位方块、不外缩、不裁圆 —— 保证它正好盖在那个座位点上 */
+.av{
+  position:absolute;inset:0;display:block;border-radius:inherit;
+  background-size:cover;background-position:center;background-color:#EDEDED;
+}
+.avbig{
+  width:72px;height:72px;border-radius:12px;object-fit:cover;flex:none;
+  background:var(--fill);
+}
+.legend{
+  display:flex;flex-wrap:wrap;gap:14px;padding:12px var(--pad) 4px;
+  font-size:13px;color:var(--ink-2);
+}
+.legend span{display:flex;align-items:center;gap:5px}
+.legend i{width:11px;height:11px;border-radius:3px;display:block}
+.rdot{width:6px;height:6px;border-radius:50%;background:var(--price);flex:none}
+
+/* ---------- 当前状况卡 ---------- */
+.livecard{margin:12px;background:#fff;border-radius:var(--r);overflow:hidden}
+.lhd{
+  display:flex;align-items:center;gap:6px;padding:13px var(--pad) 4px;
+  font-size:14px;color:var(--ink-2);
+}
+.ltitle{font-size:14px;color:var(--ink-2)}
+.lrow{
+  display:flex;align-items:center;gap:10px;padding:9px var(--pad);
+  font-size:15px;position:relative;
+}
+.lrow::after{content:"";position:absolute;left:var(--pad);right:0;bottom:0;height:1px;
+  background:var(--line);transform:scaleY(.5);transform-origin:0 100%}
+.lrow:last-child::after{display:none}
+.lrow .k{color:var(--ink-2);font-size:15px;flex:none}
+.lrow .v{flex:1;text-align:right;font-size:15px;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lfoot{padding:9px var(--pad) 13px;font-size:12.5px;color:var(--ink-3);line-height:1.5}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:5px 0;font-size:14px}
+.kv:last-child{padding-bottom:0}
+
+/* ---------- 底部浮动条 ---------- */
+.stickybar{
+  position:absolute;left:12px;right:12px;bottom:12px;
+  display:flex;align-items:center;gap:10px;padding:10px 12px;
+  background:rgba(255,255,255,.94);backdrop-filter:blur(12px);
+  border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.14),0 0 0 .5px rgba(0,0,0,.05);
+  transform:translateY(140%);transition:transform .28s cubic-bezier(.32,.72,0,1);
+  z-index:5;
+}
+.stickybar.on{transform:none}
+.sb-info{flex:1;min-width:0}
+.sb-info .k{font-size:15px;font-weight:600;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-info .v{font-size:12.5px;color:var(--ink-2);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stickybar .btn{height:40px;padding:0 20px;font-size:16px;flex:none}
+
+/* ---------- 预约卡 ---------- */
+.ocard{
+  background:#fff;margin:12px;border-radius:var(--r);overflow:hidden;
+  position:relative;
+}
+.ocard:active{background:#FAFAFA}
+.ohd{display:flex;align-items:center;gap:8px;padding:13px var(--pad) 9px}
+.ohd .name{font-size:16px;font-weight:600;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.obody{padding:0 var(--pad) 11px}
+.ofoot{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:9px var(--pad);border-top:.5px solid var(--line);background:#FCFCFC;
+  font-size:13px;color:var(--ink-2);
+}
+.oqrc{width:190px;height:190px;object-fit:contain;border-radius:8px}
+.rtxt{font-size:14px;color:var(--ink-2);line-height:1.5}
+.rangelist{display:flex;flex-direction:column;gap:0}
+.rangeitem{
+  display:flex;align-items:center;gap:8px;padding:9px 0;font-size:14px;
+  border-bottom:.5px solid var(--line);
+}
+.rangeitem:last-child{border-bottom:0}
+.rangeitem .s{flex:1;min-width:0;color:var(--ink)}
+.rangeitem .i{font-size:12px;color:var(--ink-3);flex:none}
+.st{display:flex;align-items:center;gap:6px}
+
+/* ---------- 空 / 加载 ---------- */
+.empty{
+  padding:56px 24px;text-align:center;font-size:15px;color:var(--ink-3);
+  line-height:1.6;
+}
+.page-loading{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  padding:40px 20px;font-size:14px;color:var(--ink-3);
+}
+.spinner{
+  width:16px;height:16px;border:1.8px solid rgba(0,0,0,.12);
+  border-top-color:var(--brand);border-radius:50%;
+  animation:wz-spin .8s linear infinite;flex:none;
+}
+@keyframes wz-spin{to{transform:rotate(360deg)}}
+.skel{height:14px;border-radius:4px;background:linear-gradient(90deg,#EFEFEF,#F7F7F7,#EFEFEF);
+  background-size:200% 100%;animation:wz-sk 1.3s ease-in-out infinite}
+@keyframes wz-sk{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* ---------- tabBar ---------- */
+.tabbar{
+  height:var(--tab-h);flex:none;display:flex;background:#F7F7F7;
+  position:relative;padding-bottom:env(safe-area-inset-bottom);
+}
+.tabbar::after{content:"";position:absolute;left:0;right:0;top:0;height:1px;
+  background:var(--line);transform:scaleY(.5)}
+.tabbar button{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:2px;color:var(--ink-2);position:relative;font-size:10px;
+}
+.tabbar button.on{color:var(--brand)}
+.tabbar svg{width:25px;height:25px;display:block}
+.tabbar button:active{opacity:.65}
+
+/* ---------- Toast ---------- */
+.toast{
+  position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);
+  max-width:74%;padding:14px 20px;border-radius:10px;
+  background:rgba(0,0,0,.78);color:#fff;font-size:15px;line-height:1.45;
+  text-align:center;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;
+  z-index:30;word-break:break-word;
+}
+.toast.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+.toast.wide{max-width:84%;text-align:left;font-size:13.5px}
+
+/* ---------- 微信式弹窗 ---------- */
+.mask{
+  position:absolute;inset:0;background:rgba(0,0,0,.42);opacity:0;
+  pointer-events:none;transition:opacity .22s;z-index:10;
+}
+.mask.on{opacity:1;pointer-events:auto}
+.dialog{
+  position:absolute;left:50%;top:46%;transform:translate(-50%,-50%) scale(1.06);
+  width:272px;background:#fff;border-radius:14px;overflow:hidden;
+  opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:20;
+}
+.dialog.on{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1)}
+.dtitle{padding:22px 20px 4px;font-size:17px;font-weight:600;text-align:center;line-height:1.35}
+.dbody{padding:6px 20px 20px;font-size:14px;color:var(--ink-2);text-align:center;line-height:1.55;
+  max-height:46vh;overflow:auto}
+.dfoot{display:flex;border-top:.5px solid var(--line)}
+.dfoot button{
+  flex:1;height:52px;font-size:17px;color:var(--link);
+}
+.dfoot button+button{border-left:.5px solid var(--line)}
+.dfoot button:active{background:#ECECEC}
+.dfoot button.danger{color:var(--price)}
+.dfoot button.ok{color:var(--brand);font-weight:500}
+
+/* ---------- 半屏抽屉 ---------- */
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;max-height:82%;
+  background:#fff;border-radius:16px 16px 0 0;
+  transform:translateY(102%);transition:transform .3s cubic-bezier(.32,.72,0,1);
+  z-index:20;display:flex;flex-direction:column;overflow:hidden;
+}
+.sheet.on{transform:none}
+.shd{
+  flex:none;padding:14px var(--pad) 10px;display:flex;align-items:center;gap:10px;
+  position:relative;
+}
+.shd::before{content:"";position:absolute;left:50%;top:6px;transform:translateX(-50%);
+  width:36px;height:4px;border-radius:2px;background:var(--ink-4)}
+.shd .t{flex:1;font-size:17px;font-weight:600;padding-top:6px}
+.sbody{flex:1;overflow-y:auto;padding:0 var(--pad) 8px;-webkit-overflow-scrolling:touch}
+.sfoot{flex:none;padding:10px var(--pad) calc(14px + env(safe-area-inset-bottom));
+  display:flex;gap:10px}
+.sfoot .btn{flex:1}
+
+/* ---------- HAR 列表 ---------- */
+.haritem{
+  display:flex;align-items:center;gap:10px;padding:13px var(--pad);
+  position:relative;background:#fff;
+}
+.haritem::after{content:"";position:absolute;left:var(--pad);right:0;bottom:0;height:1px;
+  background:var(--line);transform:scaleY(.5)}
+.haritem:last-child::after{display:none}
+.haritem.on{background:#E8F8EF}
+.haritem:active{background:#ECECEC}
+/* ---------- 可点的时段行 / 方形大头像 ---------- */
+.rangeitem.tap{cursor:pointer;border-radius:6px;padding-left:8px;padding-right:8px;margin:0 -8px}
+.rangeitem.tap:active{background:#ECECEC}
+.rangeitem .pill{flex:none}
+.avbig{background-size:cover;background-position:center;background-color:#EDEDED}
+
+/* —— 人脸拍照上传 —— */
+.facedrop{margin:12px 16px 0;padding:18px 16px;border:1.5px dashed var(--brand);border-radius:10px;
+  background:var(--brand-soft);text-align:center;font-size:14.5px;color:var(--ink-2);cursor:pointer;
+  transition:background .15s ease,border-color .15s ease}
+.facedrop:active{background:#DBF3E5}
+.facedrop.has{border-style:solid;background:#fff;padding:12px}
+.facedrop img{display:block;width:132px;height:132px;margin:0 auto 10px;border-radius:10px;object-fit:cover;
+  background:#EDEDED;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.facedrop .fd-ok{margin-top:8px;font-size:13.5px;color:var(--brand)}
+.link{color:var(--link)}
+.tap-link{color:var(--link);cursor:pointer;font-size:13.5px;font-weight:400;flex:0 0 auto}
+.tap-link:active{opacity:.55}
+.chev.down{transform:translateY(-1px) rotate(90deg)}
+</style>
+</head>
+<body>
+<div class="phone">
+  <!-- iOS 状态栏 -->
+  <div class="statusbar">
+    <span id="sb-time">9:41</span>
+    <span class="sb-right">
+      <svg width="18" height="12" viewBox="0 0 18 12" fill="#000"><rect x="0" y="7" width="3" height="5" rx="1"/><rect x="5" y="5" width="3" height="7" rx="1"/><rect x="10" y="2.5" width="3" height="9.5" rx="1"/><rect x="15" y="0" width="3" height="12" rx="1"/></svg>
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="#000"><path d="M8 11.2 5.6 8.6a3.4 3.4 0 0 1 4.8 0L8 11.2Zm0-4.9c-1.6 0-3.1.6-4.2 1.7L2.3 6.4A8.1 8.1 0 0 1 8 4.2c2.2 0 4.2.8 5.7 2.2l-1.5 1.6A6 6 0 0 0 8 6.3Z"/></svg>
+      <svg width="26" height="12" viewBox="0 0 26 12"><rect x=".5" y=".5" width="21" height="11" rx="3" fill="none" stroke="#000" stroke-opacity=".35"/><rect x="2" y="2" width="16" height="8" rx="1.6" fill="#000"/><path d="M23 4v4c1.1-.3 1.6-.9 1.6-2S24.1 4.3 23 4Z" fill="#000" fill-opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <!-- 导航栏 -->
+  <div class="navbar" id="navbar">
+    <button class="nav-back" id="nav-back" hidden>
+      <svg width="11" height="19" viewBox="0 0 11 19" fill="none"><path d="M9.5 1.5 2 9.5l7.5 8" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="nav-title" id="nav-title">王知之自习室</div>
+    <div class="capsule">
+      <i><svg width="15" height="4" viewBox="0 0 15 4" fill="#000"><circle cx="2" cy="2" r="1.7"/><circle cx="7.5" cy="2" r="1.7"/><circle cx="13" cy="2" r="1.7"/></svg></i>
+      <span class="dotline"></span>
+      <i><svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="#000" stroke-width="1.3"><circle cx="7.5" cy="7.5" r="6.2"/><circle cx="7.5" cy="7.5" r="2.2"/></svg></i>
+    </div>
+  </div>
+
+  <div class="viewport" id="viewport"></div>
+
+  <!-- tabBar -->
+  <div class="tabbar" id="tabbar">
+    <button data-tab="stores" class="on">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 4.8 4h14.4L21 9.5"/><path d="M4 9.5h16V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9.5Z"/><path d="M9.5 21v-6h5v6"/></svg>
+      <span>门店</span>
+    </button>
+    <button data-tab="book">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18v4H3z"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 14h6"/></svg>
+      <span>选座</span>
+    </button>
+    <button data-tab="orders">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8.5 8.5h7M8.5 12.5h7M8.5 16.5h4"/></svg>
+      <span>预约</span>
+      <span class="badge" id="tab-badge" hidden></span>
+    </button>
+    <button data-tab="me">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4.5 21c.6-4 3.7-6.2 7.5-6.2S19 17 19.6 21"/></svg>
+      <span>我的</span>
+    </button>
+  </div>
+
+  <div class="mask" id="mask"></div>
+  <div class="toast" id="toast"></div>
+  <div class="dialog" id="dialog"></div>
+  <div class="sheet" id="sheet"></div>
+</div>
+
+<script>
+/* ==========================================================================
+   王知之自习室 · 选座下单助手（前端）
+   零依赖单文件。所有网络都打本机 127.0.0.1:8790。
+   ========================================================================== */
+const $ = s => document.querySelector(s);
+const viewport = $('#viewport');
+
+const state = {
+  status: null,          // /api/status
+  stores: [], cityCount: 0, byCity: {},
+  city: '', kw: '',
+  store: null,           // 当前选中门店（门店列表项）
+  storeInfo: null,       // /api/store 详情
+  date: '', start: '', end: '',
+  rooms: [], prices: {}, myUserId: null,
+  selected: null,        // {seatId, spaceId, seatName, spaceName}
+  orders: [], lastOrder: null,
+  stack: [],             // 页面栈，用于返回
+  loadingSeats: false,
+};
+
+/* ---------------- 小程序式路由 ---------------- */
+const TITLES = { stores:'王知之自习室', book:'选择座位', orders:'我的预约', me:'我的', store:'门店详情', order:'预约详情', token:'更新 token' };
+const NAV_TABS = ['stores', 'book', 'orders', 'me'];
+
+function push(page, opts = {}) {
+  if (state.page === page && !opts.force) return render(page, 'none');
+  if (state.page && state.page !== page) state.stack.push(state.page);
+  state.page = page;
+  render(page, opts.anim || 'push');
+}
+function replace(page, anim = 'none') {
+  state.page = page;
+  render(page, anim);
+}
+function back() {
+  const prev = state.stack.pop();
+  if (prev) { state.page = prev; render(prev, 'pop'); }
+  else go('stores');
+}
+function go(tab) {
+  state.stack = [];
+  state.page = tab;
+  render(tab, 'none');
+  document.querySelectorAll('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+}
+function render(page, anim) {
+  const el = document.createElement('div');
+  el.className = 'page';
+  if (anim && anim !== 'none') el.dataset.anim = anim;
+  el.innerHTML = PAGES[page] ? PAGES[page]() : '<div class="empty">页面不存在</div>';
+  const old = viewport.querySelector('.page');
+  if (old) old.remove();
+  viewport.appendChild(el);
+  el.scrollTop = 0;
+  $('#nav-title').textContent = TITLES[page] || '';
+  $('#nav-back').hidden = NAV_TABS.includes(page);
+  document.querySelectorAll('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === page));
+  if (AFTER[page]) AFTER[page](el);
+}
+document.querySelectorAll('#tabbar button').forEach(b => b.onclick = () => {
+  if (b.dataset.tab === 'book' && !state.store) {
+    // 「选座」是二级页，没选门店时先引导去门店
+    toast('先在「门店」里选一家 0 元店', 'wide');
+    go('stores'); return;
+  }
+  go(b.dataset.tab);
+});
+$('#nav-back').onclick = back;
+
+/* ---------------- 小工具 ---------------- */
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const yuan = v => v == null ? '—' : '¥' + Number(v).toFixed(2);
+const hhmm = t => String(t || '').slice(0, 5);
+const toMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
+// 夹在 00:00~23:59 内 —— 否则深夜算窗口会算出 "24:26" 这种非法时间（实测踩过）
+const minHHMM = m => { const v = Math.max(0, Math.min(23 * 60 + 59, Math.round(Number(m) || 0)));
+  return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`; };
+const todayStr = () => new Date().toLocaleDateString('sv-SE');
+const dayStr = n => { const d = new Date(); d.setDate(d.getDate() + (Number(n) || 0)); return d.toLocaleDateString('sv-SE'); };
+const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+function billableMin(min, unit = 30) { return Math.ceil(min / unit) * unit; }
+function durationMin() { return Math.max(0, toMin(state.end) - toMin(state.start)); }
+function priceOf(spaceId) { return state.prices[spaceId] ?? null; }
+function estimate() {
+  const p = priceOf(state.selected?.spaceId);
+  const m = durationMin();
+  if (p == null || !m) return null;
+  return p / 100 * (billableMin(m, 30) / 60);
+}
+
+let toastTimer = null;
+function toast(text, kind = '') {
+  const t = $('#toast');
+  t.className = 'toast on' + (kind === 'wide' ? ' wide' : '');
+  t.innerHTML = (kind === 'wide' ? '' : `
+    <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="rgba(255,255,255,.22)"/><path d="M7 12.4l3.2 3.2L17 9" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`)
+    + '<div>' + esc(text) + '</div>';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.classList.remove('on'); }, kind === 'wide' ? 2600 : 1800);
+}
+function maskSheet(on) { $('#mask').classList.toggle('on', !!on); }
+function closeSheet() { $('#sheet').classList.remove('on'); maskSheet(false); }
+function openSheet(html) {
+  const s = $('#sheet');
+  s.innerHTML = html;
+  requestAnimationFrame(() => s.classList.add('on'));
+  maskSheet(true);
+}
+$('#mask').onclick = () => { closeSheet(); closeDialog(); };
+
+function closeDialog() { $('#dialog').classList.remove('on'); if (!$('#sheet').classList.contains('on')) maskSheet(false); }
+/** 微信式确认弹窗：返回 Promise<boolean> */
+function confirmDialog({ title, body, ok = '确定', cancel = '取消', danger = false }) {
+  return new Promise(resolve => {
+    const d = $('#dialog');
+    d.innerHTML = `
+      <div class="dtitle">${esc(title)}</div>
+      <div class="dbody">${body}</div>
+      <div class="dfoot">
+        <button data-x="0">${esc(cancel)}</button>
+        <button data-x="1" class="${danger ? 'warn' : ''}">${esc(ok)}</button>
+      </div>`;
+    d.classList.add('on'); maskSheet(true);
+    d.querySelectorAll('button').forEach(b => b.onclick = () => { closeDialog(); resolve(b.dataset.x === '1'); });
+  });
+}
+
+async function jget(url) {
+  const r = await fetch(url);
+  const j = await r.json().catch(() => ({ ok: false, msg: '返回不是 JSON（HTTP ' + r.status + '）' }));
+  return j;
+}
+async function jpost(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({ ok: false, msg: '返回不是 JSON（HTTP ' + r.status + '）' }));
+  return j;
+}
+
+/* ---------------- 页面模板 ---------------- */
+const PAGES = {};
+
+/* —— 门店 —— */
+PAGES.stores = () => `
+  <div class="page-inner">
+    <div class="search ${state.kw ? 'has' : ''}" id="sbox">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(0,0,0,.4)" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5" stroke-linecap="round"/></svg>
+      <input id="kw" placeholder="搜索城市或门店名，如 重庆 / 绵阳" value="${esc(state.kw)}">
+      <button class="clr" id="kw-clr">✕</button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div id="store-list">${skeletons()}</div>
+    <div class="tip">
+      只列出你月卡 <b>0 元覆盖</b>的门店。点进去看座位图，选中座位可以直接下单，用月卡抵扣后实付 <b>¥0</b>。<br>
+      下单后开门 / 开灯 / 退座都能在本工具里做（选座页有「当前状况」卡，预约详情页有操作按钮）。
+    </div>
+  </div>`;
+
+/* —— 选座（二级页）—— */
+PAGES.book = () => `
+  <div class="page-inner">
+    <div class="group">
+      <div class="cell">
+        <div class="c-main">
+          <div class="c-title store-name">${esc(state.store?.storeName || '—')}</div>
+          <div class="c-desc store-addr">${esc(state.store?.addr || '')}</div>
+        </div>
+      </div>
+      <div id="store-head"></div>
+    </div>
+    <div id="live-host"></div>
+    <div class="group">
+      <div class="group-hd"><b>预约时段</b><span id="biz-hint"></span></div>
+      <div class="picks" id="quick"></div>
+      <div class="inputs">
+        <div class="inp"><label>日期</label><input type="date" id="d" value="${esc(state.date)}" min="${todayStr()}"></div>
+        <div class="inp"><label>开始</label><input type="time" id="s" step="300" value="${esc(state.start)}"></div>
+        <div class="inp"><label>结束</label><input type="time" id="e" step="300" value="${esc(state.end)}"></div>
+      </div>
+      <div class="tip" id="time-hint" style="padding-top:0"></div>
+    </div>
+    <div id="seat-host">${state.rooms.length ? '' : '<div class="page-loading"><span class="spinner"></span> 正在获取座位图…</div>'}</div>
+    <div class="legend">
+      <span><i style="background:var(--seat-free)"></i>可预约</span>
+      <span><i style="background:var(--seat-taken)"></i>已占用</span>
+      <span><i style="background:var(--seat-mine)"></i>我的</span>
+      <span><i style="background:var(--seat-sel)"></i>已选</span>
+    </div>
+    <div id="agenda-host"></div>
+  </div>
+  <div class="stickybar" id="sticky">
+    <div class="sb-info">
+      <div class="k" id="st-k">未选座位</div>
+      <div class="v" id="st-v">点绿色座位选择 · 预估 ¥0.00</div>
+    </div>
+    <button class="btn" id="st-go" disabled>去下单</button>
+  </div>`;
+
+/* —— 我的预约 —— */
+PAGES.orders = () => `
+  <div class="page-inner">
+    <div id="order-list" style="margin-top:12px"><div class="page-loading"><span class="spinner"></span> 正在获取预约…</div></div>
+    <div id="order-hist"></div>
+    <div class="group">
+      <div class="cell tap" id="oid-toggle">
+        <div class="c-main"><div class="c-title link">按订单号查单</div>
+          <div class="c-desc">「当前预约」只列活跃的单，退座 / 结束就消失；用订单号可以回查</div></div>
+        <span class="chev" id="oid-chev"></span></div>
+    </div>
+    <div id="oid-panel" style="display:none">
+      <div class="group">
+        <div class="inputs" style="padding:4px 16px 10px">
+          <div class="inp" style="flex:1;min-width:0"><label>订单号</label><input id="oid" placeholder="20261016190304553-014486CTIMe8M0"></div>
+        </div>
+        <div class="cell tap" id="oid-go"><div class="c-main"><div class="c-title link">查询这一单</div></div><span class="chev"></span></div>
+      </div>
+    </div>
+  </div>`;
+
+/* —— 预约详情（二级页）—— */
+PAGES.order = () => {
+  const o = state.orderDetail;
+  if (!o) return '<div class="empty">订单不存在</div>';
+  const si = o.statusInfo || { label: '状态 ' + o.orderStatus, tone: 'mute', conf: 'unknown' };
+  const st = ['ok', 'warn', 'bad', 'mute', 'blue'].includes(si.tone) ? si.tone : 'mute';
+  // 只有「已支付(3)」「使用中(6)」才允许碰硬件；1 待支付 / 8 已结束都不行
+  const live = [3, 6].includes(Number(o.orderStatus));
+  const hasDev = !!(o.devices && o.devices.length);
+  return `
+  <div class="page-inner">
+    <div class="group">
+      <div class="cell" style="min-height:64px">
+        <div class="c-main">
+          <div class="c-title">${esc(o.storeName || '—')}</div>
+          <div class="c-desc">${esc(o.area || '')}</div>
+        </div>
+        <span class="pill ${st}">${esc(si.label)}</span>
+      </div>
+      <div class="cell"><div class="c-main"><div class="c-title">订单状态码</div></div>
+        <div class="c-extra"><span class="mono">orderStatus = ${esc(String(o.orderStatus))}</span></div></div>
+      ${si.hint ? `<div class="tip" style="padding-top:6px">⚠ ${esc(si.hint)}</div>` : ''}
+    </div>
+    <div class="actions">
+      <button class="btn" id="act-door" ${live && hasDev ? '' : 'disabled'}>开门</button>
+      <button class="btn ghost" id="act-checkin" ${live ? '' : 'disabled'}>签到</button>
+      <button class="btn ghost" id="act-light" ${live ? '' : 'disabled'}>开灯</button>
+      <button class="btn danger" id="act-leave" ${live ? '' : 'disabled'}>退座</button>
+    </div>
+    <div id="act-out"></div>
+    <div class="group">
+      <div class="group-hd"><b>现在能做什么</b><small class="subtle">按 orderStatus 判断</small></div>
+      ${live
+        ? `<div class="tip" style="padding:6px 16px 12px">
+             <b>已支付 / 使用中</b>：可以用上面四个按钮。<br>
+             <b>开门</b>是纯服务端指令——请求体里 <span class="mono">lat/lon</span> 由客户端提交，服务端只比「报的位置离门店够不够近」，
+             容差 <span class="mono">storeDistanceStipulation</span> = 1km，所以本页直接提交<b>订单自带的门店坐标</b>（距离≈0）。
+             1km 的容差远大于蓝牙范围，这也是这个锁能在 1km 外开的原因。<br>
+             <b>签到</b>（<span class="mono">/seat/order/immediatelySeat</span>）同一套距离校验，成功后订单变<b>「使用中」</b>、座位变<b>占用中</b>。<br>
+             <b>开灯</b>（<span class="mono">/seat/order/openLight</span>）实测<b>没跑通</b>：订单「已支付」时返回 <span class="mono">100862 当前订单未在进行中</span>，<br>
+             订单「使用中」时则恒定返回 <span class="mono">code 500</span>（空 msg），换各种参数都一样。<br>
+             实际上灯是<b>「签到」点亮的</b>、<b>「退座」关掉的</b> —— 所以想开灯，点签到就够了。<br>
+             <b>退座不可逆</b>：立刻结束本次学习、释放座位，已扣的月卡天数<b>不退回</b>。
+           </div>`
+        : `<div class="tip" style="padding:6px 16px 12px">
+             ${Number(o.orderStatus) === 1
+               ? '这一单还是<b>待支付</b>，不能开门。先回「选座」用月卡抵扣，或去原 App 支付。'
+               : '这一单已<b>结束</b>，座位已释放，不能再开门 / 签到 / 开灯。重新预约后才能操作。'}
+             ${!hasDev ? '<br>另外这一单没有返回开门设备（<span class="mono">buttonNames</span> 为空）。' : ''}
+           </div>`}
+    </div>
+    <div class="group">
+      <div class="group-hd"><b>预约信息</b></div>
+      <div class="cell"><div class="c-main"><div class="c-title">位置</div></div><div class="c-extra">${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">时间</div></div><div class="c-extra">${esc(o.date || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}${o.endDate && o.endDate !== o.date ? '（至 ' + esc(o.endDate) + '）' : ''}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">订单号</div></div><div class="c-extra mono">${esc(o.orderId)}</div></div>
+      ${o.cardTypeName ? `<div class="cell"><div class="c-main"><div class="c-title">结算方式</div></div><div class="c-extra">${esc(o.cardTypeName)}${o.paymentMethod != null ? ' · paymentMethod=' + esc(String(o.paymentMethod)) : ''}</div></div>` : ''}
+      ${o.expiredTime ? `<div class="cell"><div class="c-main"><div class="c-title">支付截止</div><div class="c-desc">下单后 5 分钟未支付会失效（字段 expiredTime）</div></div><div class="c-extra">${esc(o.expiredTime)}</div></div>` : ''}
+    </div>
+    ${o.storeManagerUrl ? `
+    <div class="group">
+      <div class="group-hd"><b>店长码</b><small class="subtle">长按可保存 · 转让 / 找店长用</small></div>
+      <div class="cell" style="justify-content:center"><img class="oqrc" src="${esc(o.storeManagerUrl)}" alt="店长码"></div>
+    </div>` : ''}
+    <div class="group">
+      <div class="group-hd"><b>开门设备</b></div>
+      ${(o.devices && o.devices.length) ? o.devices.map(d => `
+        <div class="cell"><div class="c-main"><div class="c-title">${esc(d.buttonName || '开门')}</div>
+          <div class="c-desc mono">deviceId ${esc(d.deviceId || '—')} · ${esc(d.manufacturerCode || '')}</div></div></div>`).join('')
+        : '<div class="tip">这个订单没有返回开门设备</div>'}
+      ${(o.wifiNames && o.wifiNames.length) ? `<div class="cell"><div class="c-main"><div class="c-title">到店要连的 WiFi</div>
+        <div class="c-desc mono">${o.wifiNames.map(esc).join('  /  ')}</div></div><div class="c-extra"><span class="pill blue">开门前置</span></div></div>` : ''}
+      ${o.advanceOpeningTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">可提前开门</div>
+        <div class="c-desc">开始前 ${esc(String(o.advanceOpeningTime))} 分钟内才能开门（advanceOpeningTime）</div></div>
+        <div class="c-extra">${esc(String(o.advanceOpeningTime))} 分钟</div></div>` : ''}
+      ${o.longestReservationTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">还能续多久</div>
+        <div class="c-desc">本单最长可预约 ${Math.round(o.longestReservationTime / 60 * 10) / 10} 小时${o.advanceContinueTime != null ? ` · 需提前 ${esc(String(o.advanceContinueTime))} 分钟续` : ''}</div></div>
+        <div class="c-extra"><span class="pill mute">续约回原 App</span></div></div>` : ''}
+      <div class="tip">
+        <b>开门 / 开灯 / 退座都在本页可以直接做</b>（上面那排按钮），不用回原 App。<br>
+        实测更正：HAR 里那两次 <span class="mono">code 317 当前距离过大</span> 不是因为要蓝牙，
+        而是因为提交的坐标是 <span class="mono">43.86/87.54</span>（乌鲁木齐）而这家店真实坐标是
+        <span class="mono">${esc(String(o.lat ?? '—'))}/${esc(String(o.lon ?? '—'))}</span>，差了约 2000km。
+        服务端只比「提交点 ↔ 门店点」的直线距离，容差 1km —— 所以提交门店自己的坐标就能通过。
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-hd"><b>原始返回</b><small class="subtle">排查问题用</small></div>
+      <pre class="raw">${esc(JSON.stringify(o, null, 2))}</pre>
+    </div>
+  </div>`;
+};
+
+/* —— 门店详情（二级页）—— */
+PAGES.store = () => {
+  const s = state.storeInfo;
+  if (!s) return '<div class="empty">门店信息加载失败</div>';
+  const pr = (state.storePrices || []).map(p => `¥${p.yuanPerHour}/小时`).filter((v, i, a) => a.indexOf(v) === i).join(' / ');
+  return `
+  <div class="page-inner">
+    ${s.photos && s.photos.length ? `<div style="margin:10px 12px 0;border-radius:8px;overflow:hidden;background:#fff">
+      <img src="${esc(s.photos[0])}" alt="" style="width:100%;display:block"></div>` : ''}
+    <div class="group">
+      <div class="cell"><div class="c-main"><div class="c-title store-name">${esc(s.name)}</div>
+        <div class="c-desc store-addr">${esc(s.addr || s.area || '')}</div></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">营业状态</div></div>
+        <div class="c-extra"><span class="pill ${s.isOpen ? 'ok' : 'bad'}">${s.isOpen ? '营业中' : '已打烊'}</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">营业时间</div></div><div class="c-extra">${esc(hhmm(s.bizStart))} – ${esc(hhmm(s.bizEnd))}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">座位</div></div><div class="c-extra">已用 ${esc(String(s.seatUsed ?? '—'))} / 共 ${esc(String(s.seatAll ?? '—'))}</div></div>
+      ${pr ? `<div class="cell"><div class="c-main"><div class="c-title">单价</div></div><div class="c-extra money">${esc(pr)}</div></div>` : ''}
+      ${state.storeDist != null ? `<div class="cell"><div class="c-main"><div class="c-title">离我</div></div><div class="c-extra">${(state.storeDist / 1000).toFixed(1)} km</div></div>` : ''}
+    </div>
+    <div class="group">
+      <div class="group-hd"><b>预约规则</b></div>
+      <div class="cell"><div class="c-main"><div class="c-title">单次时长</div></div><div class="c-extra">${Math.round(s.demandMinutes / 60 * 10) / 10} 小时起 · 最长 ${Math.round(s.maxMinutes / 60)} 小时</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">可提前预约</div></div><div class="c-extra">${esc(String(s.demandDay))} 天</div></div>
+      ${state.cancelRule ? `<div class="cell"><div class="c-main"><div class="c-title">取消规则</div>
+        <div class="c-desc">预计开始前 ${state.cancelRule.aheadCancelBookingMinutes ?? 30} 分钟以上取消不扣费；之后取消扣 ${state.cancelRule.bookingAheadCloseDeductMinutes ?? 30} 分钟</div></div>
+        <div class="c-extra"><span class="pill blue">${esc(String(state.cancelRule.aheadCancelBookingMinutes ?? 30))} 分钟</span></div></div>` : ''}
+      ${s.pledge && s.pledge.length ? s.pledge.map(t => `<div class="cell"><div class="c-main"><div class="c-desc">${esc(t)}</div></div></div>`).join('') : ''}
+    </div>
+    <div class="notice gray" style="margin-bottom:18px">本工具不会替你在原 App 取消订单 —— 平台没有暴露取消接口（HAR 53 个接口 0 命中）。上面是门店返回的取消规则，供你决定什么时候下单。</div>
+  </div>`;
+};
+
+/* —— 我的 —— */
+PAGES.me = () => {
+  const s = state.status || {};
+  const t = s.token || {};
+  const alive = s.tokenAlive;
+  const days = t.daysLeft;
+  const tone = alive === true ? (days > 7 ? 'ok' : 'warn') : 'bad';
+  return `
+  <div class="page-inner">
+    <div class="group" style="margin-top:12px">
+      <div class="cell" style="min-height:66px">
+        <div class="c-main">
+          <div class="c-title">登录凭证（JWT token）</div>
+          <div class="c-desc">${alive === true ? '探活正常，可以直接下单' : alive === false ? '探活失败：' + esc(s.probeMsg || '') : '检测中…'}</div>
+        </div>
+        <span class="pill ${tone}">${alive === true ? (days > 7 ? '正常' : '将过期') : alive === false ? '已失效' : '…'}</span>
+      </div>
+      <div class="cell"><div class="c-main"><div class="c-title">有效期至</div></div><div class="c-extra">${esc(t.expStr || '—')}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">剩余</div></div><div class="c-extra">${days == null ? '—' : days + ' 天'}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">userId</div></div><div class="c-extra mono">${esc(t.myUserId || '—')}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">来源</div></div><div class="c-extra">${esc(s.tokenSource || '—')}</div></div>
+      <div class="cell tap" id="tok-toggle">
+        <div class="c-main"><div class="c-title link">更新 JWT token</div>
+          <div class="c-desc">就在这一页换，不用跳页：扫本机抓包一键提取，或直接粘贴</div></div>
+        <span class="chev" id="tok-chev"></span></div>
+    </div>
+    <div id="tok-panel" style="display:none">
+      <div class="group">
+        <div class="group-hd"><b>① 从抓包文件一键更新</b><span id="har-refresh" class="tap-link">重新扫描</span></div>
+        <div id="har-list"></div>
+      </div>
+      <div class="group">
+        <div class="group-hd"><b>② 或者粘贴</b><span>整段 HAR 也行</span></div>
+        <div class="cell" style="display:block">
+          <textarea class="raw" id="tok-paste" placeholder="粘贴 eyJ... 开头的 JWT，或直接把 HAR 里的一段内容粘进来"></textarea>
+          <div class="subtle" style="margin-top:8px">UA 会沿用当前值；换了微信版本请用「① 抓包文件」方式，它会连 UA 一起更新。</div>
+          <div class="btn-row" style="padding:12px 0 0"><button class="btn" id="tok-save">校验并保存</button></div>
+        </div>
+      </div>
+      <div id="tok-result"></div>
+    </div>
+
+    <div class="group">
+      <div class="group-hd"><b>月卡 0 元覆盖</b><span>实时取自 /card/available-stores</span></div>
+      <div class="cell"><div class="c-main"><div class="c-title">覆盖门店</div></div><div class="c-extra">${s.zeroCount ?? '—'} 家 · ${s.cities ?? '—'} 个城市</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">userCardId</div></div><div class="c-extra mono" style="max-width:170px;overflow:hidden;text-overflow:ellipsis">${esc(s.cardId || '—')}</div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">月卡抵扣</div><div class="c-desc">扣月卡 1 天，实付 ¥0，订单直接变「已支付」</div></div>
+        <div class="c-extra"><span class="pill ${s.allowCardSettle ? 'ok' : 'mute'}">${s.allowCardSettle ? '已开启' : '已关闭'}</span></div></div>
+    </div>
+
+    <div class="group">
+      <div class="group-hd"><b>人脸门禁</b><span>传一次，到门口刷脸就行</span></div>
+      <div class="cell" style="display:block">
+        <div class="facedrop" id="face-drop">
+          <img id="face-prev" alt="" style="display:none">
+          <div id="face-hint">点这里选一张<b>正脸清晰</b>的照片（手机可拍照）<br>会自动裁成方图再传</div>
+        </div>
+        <input type="file" id="face-file" accept="image/*" style="display:none">
+        <div class="btn-row" style="padding:12px 0 0">
+          <button class="btn" id="face-go" disabled>上传并建立人脸档</button>
+        </div>
+        <div class="subtle" style="margin-top:8px">
+          走 <span class="mono">/store/home/page/upload/file</span> 传到平台 OSS，再调
+          <span class="mono">/user-face/create</span> 建档 —— 两条都是从你抓的「上传人脸」包里逆出来的。<br>
+          平台<b>没有</b>「查是否已建过脸」的接口，所以这里显示不了状态；重复上传会覆盖旧的脸。
+        </div>
+      </div>
+      <div id="face-out"></div>
+    </div>
+
+    <div class="group">
+      <div class="group-hd"><b>现在已经能做的</b></div>
+      <div class="cell"><div class="c-main"><div class="c-title">开门</div><div class="c-desc">走服务端 HTTP 下发（不是蓝牙）。提交门店自带坐标即可过 1km 距离判定</div></div><div class="c-extra"><span class="pill ok">预约详情页</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">到店签到 / 立即入座</div><div class="c-desc">immediatelySeat：同一套 1km 校验，成功后订单变「使用中」、座位变占用中</div></div><div class="c-extra"><span class="pill ok">预约详情页</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">开灯 / 关灯</div><div class="c-desc">openLight 实测没跑通（有活跃订单时恒 code 500）。灯实际由<b>签到点亮</b>、<b>退座关掉</b> —— 状态看 lightOpenStatus</div></div><div class="c-extra"><span class="pill bad">未跑通</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">退座（结束本次学习）</div><div class="c-desc">finishStudy：立刻释放座位，orderStatus → 8；已扣月卡天数不退回</div></div><div class="c-extra"><span class="pill ok">不可逆</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">看占座人 + 该座时段</div><div class="c-desc">座位图上点占用的座位：头像 + querySeatSpareTime 给出的占用区间</div></div><div class="c-extra"><span class="pill ok">选座页</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">上传人脸建档</div><div class="c-desc">upload/file → user-face/create；传完到门禁机刷脸，不用在网页点开门</div></div><div class="c-extra"><span class="pill ok">这一页</span></div></div>
+    </div>
+
+    <div class="group">
+      <div class="group-hd"><b>还是做不到的</b></div>
+      <div class="cell"><div class="c-main"><div class="c-title">取消订单 / 退卡</div><div class="c-desc">平台没有暴露取消接口（HAR 53 个接口 + 141 个候选路由全 0 命中）</div></div><div class="c-extra"><span class="pill mute">回原 App</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">微信支付</div><div class="c-desc">要客户端 + 商户号；0 元店用不上</div></div><div class="c-extra"><span class="pill mute">回原 App</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">查别人昵称 / 别人订单</div><div class="c-desc">只有 userPhoto + userId，没有 getUserInfo 这类只读接口（实测全 404）</div></div><div class="c-extra"><span class="pill mute">无接口</span></div></div>
+      <div class="cell"><div class="c-main"><div class="c-title">补差价升级 / 自助转让</div><div class="c-desc">userUpgrade 返回「该方法已废弃」；转让只有店长人工流程</div></div><div class="c-extra"><span class="pill mute">无入口</span></div></div>
+    </div>
+
+    <div class="notice red" style="margin-bottom:18px">
+      <b>风险自担</b>：这是对你自己账号的面板。只监听 <span class="mono">127.0.0.1</span>，不要改成 0.0.0.0、不要把 token 给别人 —— token 等于你 <span class="mono">${
+        esc(state.status?.token?.myUserId || '')}</span> 的实名账号。<br>
+      抵扣不可撤销：平台没有取消 / 退卡接口，扣掉的 1 天要不回来。
+    </div>
+  </div>`;
+};
+
+/* —— 更新 token（二级页）—— */
+PAGES.token = () => `
+  <div class="page-inner">
+    <div class="notice blue" style="margin-top:12px">
+      token 与 User-Agent <b>绑死</b>：UA 里微信版本号差一位，服务端就返回 <span class="mono">12002 Token失效</span>。
+      所以换包时<b>连 UA 一起同步</b>，用下面的一键方式最稳。
+    </div>
+
+    <div class="group">
+      <div class="group-hd"><b>① 从抓包文件一键更新</b><span id="har-refresh" class="subtle" style="cursor:pointer">重新扫描</span></div>
+      <div id="har-list"><div class="page-loading"><span class="spinner"></span> 正在扫描 Downloads 里的 .har…</div></div>
+    </div>
+
+    <div class="group">
+      <div class="group-hd"><b>② 或者粘贴</b><span>JWT 本身，或整段抓包内容</span></div>
+      <div class="cell" style="display:block">
+        <textarea class="raw" id="tok-paste" placeholder="粘贴 eyJ... 开头的 JWT，或直接把 HAR 里的一段请求内容粘进来"></textarea>
+        <div class="subtle" style="margin-top:8px">UA 会沿用当前值；若你换了微信版本，请用「① 抓包文件」方式（它会连 UA 一起更新）。</div>
+        <div class="btn-row" style="padding:12px 0 0"><button class="btn" id="tok-save">校验并保存</button></div>
+      </div>
+    </div>
+
+    <div id="tok-result"></div>
+    <div class="tip" style="padding-bottom:24px">
+      保存前会先用新 token 打一次 <span class="mono">/fp/store/org/store-count</span> 探活，把结果告诉你。<br>
+      换完不用重启服务（<span class="mono">auth.json</span> 会被热加载）。
+    </div>
+  </div>`;
+
+/* ---------------- 各页面的副作用 ---------------- */
+const AFTER = {};
+
+AFTER.stores = (el) => {
+  el.querySelector('#kw').oninput = e => {
+    state.kw = e.target.value;
+    el.querySelector('#sbox').classList.toggle('has', !!state.kw);
+    paintStores(el);
+  };
+  el.querySelector('#kw-clr').onclick = () => {
+    state.kw = ''; el.querySelector('#kw').value = '';
+    el.querySelector('#sbox').classList.remove('has'); paintStores(el);
+  };
+  if (!state.stores.length) loadStores(el); else { paintChips(el); paintStores(el); }
+};
+
+function skeletons() {
+  return `<div class="group" style="margin-top:10px">${'<div class="cell"><div class="c-main"><div class="skel" style="width:60%"></div><div class="skel" style="width:85%;height:11px"></div></div></div>'.repeat(5)}</div>`;
+}
+
+async function loadStores(el) {
+  el.querySelector('#store-list').innerHTML = skeletons();
+  const r = await jget('/api/stores');
+  if (!r.ok) { el.querySelector('#store-list').innerHTML = `<div class="empty">门店清单加载失败：${esc(r.msg || '')}</div>`; return; }
+  state.stores = r.stores || []; state.byCity = r.byCity || {}; state.cityCount = r.cityCount || 0;
+  if (r.stale) el.querySelector('#store-list').innerHTML =
+    `<div class="notice red" style="margin:10px 0 0">实时拉取 0 元门店失败，正在用本地种子兜底：${esc(r.failMsg || '')}</div>`;
+  paintChips(el); paintStores(el);
+}
+
+function paintChips(el) {
+  const chips = el.querySelector('#chips');
+  if (!chips) return;
+  const cities = Object.entries(state.byCity).map(([c, ids]) => [c, ids.length]).sort((a, b) => b[1] - a[1]);
+  chips.innerHTML = `<div class="chip ${state.city ? '' : 'on'}" data-city="">全部<span class="n">${state.stores.length}</span></div>`
+    + cities.map(([c, n]) => `<div class="chip ${state.city === c ? 'on' : ''}" data-city="${esc(c)}">${esc(c)}<span class="n">${n}</span></div>`).join('');
+  chips.querySelectorAll('.chip').forEach(c => c.onclick = () => { state.city = c.dataset.city; paintChips(el); paintStores(el); });
+}
+
+function paintStores(el) {
+  const box = el.querySelector('#store-list');
+  if (!box) return;
+  const kw = state.kw.trim();
+  let list = state.stores;
+  if (state.city) list = list.filter(s => s.city === state.city);
+  if (kw) list = list.filter(s => s.storeName.includes(kw) || s.city.includes(kw) || s.addr.includes(kw));
+  if (!list.length) { box.innerHTML = '<div class="empty">没有匹配的门店</div>'; return; }
+  const show = list.slice(0, 300);
+  box.innerHTML = `<div class="group" style="margin-top:10px">${show.map(s => `
+    <div class="cell tap" data-id="${esc(s.storeId)}">
+      <div class="c-main"><div class="c-title store-name">${esc(s.storeName)}</div>
+        <div class="c-desc store-addr">${esc(s.city)} · ${esc(s.addr)}</div></div>
+      <div class="c-extra">${esc(s.bizTime ? s.bizTime.split('~')[0].slice(0, 5) : '')}<span class="chev"></span></div>
+    </div>`).join('')}</div>
+    ${list.length > 300 ? `<div class="tip">只显示了前 300 家，用搜索或城市筛选缩小范围</div>` : ''}`;
+  box.querySelectorAll('.cell').forEach(c => c.onclick = () => openStore(c.dataset.id));
+}
+
+/* —— 打开门店：拉详情 + 座位，进「选座」页 —— */
+async function openStore(storeId, opts = {}) {
+  const s = state.stores.find(x => String(x.storeId) === String(storeId));
+  state.store = s || { storeId, storeName: storeId, addr: '', city: '' };
+  state.selected = null; state.rooms = []; state.prices = {}; state.storeInfo = null;
+  if (!state.start) resetTimes();
+  push('book', opts);
+  const el = viewport.querySelector('.page');
+  const [info, seats] = await Promise.all([
+    jget('/api/store?storeId=' + encodeURIComponent(storeId) + '&date=' + state.date),
+    jget('/api/seats?storeId=' + encodeURIComponent(storeId) + '&date=' + state.date + '&start=' + state.start + '&end=' + state.end),
+  ]);
+  if (!viewport.contains(el)) return;   // 用户已经切走了
+  if (info.ok) {
+    state.storeInfo = info.store; state.storePrices = info.prices; state.cancelRule = info.cancelRule;
+    state.storeDist = info.store.distance; state.prices = Object.fromEntries(info.prices.map(p => [p.spaceId, p.price]));
+    paintStoreHead(el);
+  }
+  if (seats.ok) {
+    state.rooms = seats.rooms; state.myUserId = seats.myUserId;
+    if (!Object.keys(state.prices).length) state.prices = Object.fromEntries(seats.prices.map(p => [p.spaceId, p.price]));
+    state.storeMeta = seats.store;
+    paintSeats(el);
+  } else {
+    el.querySelector('#seat-host').innerHTML = `<div class="notice red">座位图获取失败：${esc(seats.msg || '')}</div>`;
+  }
+}
+
+function resetTimes() {
+  // 默认给「当前时间 +30 分钟」往后 4 小时的一段。
+  // 边界：深夜（今天排不出这段了）自动滚到明天早上开门时间 —— 否则会算出 24:xx 这种非法窗口，
+  // 接口收到就返回空座位，座位图一片空白（实测踩过）。
+  const BIZ_OPEN = 7 * 60;
+  const LAST_START = 23 * 60 + 30;      // 23:30 之后就别再开今天的新窗口了
+  const d = new Date();
+  let mins = Math.ceil((d.getHours() * 60 + d.getMinutes() + 30) / 30) * 30;
+  if (mins > LAST_START) { state.date = dayStr(1); mins = BIZ_OPEN; }
+  else { state.date = todayStr(); }
+  state.start = minHHMM(mins);
+  state.end = minHHMM(mins + 240);
+  if (toMin(state.end) <= toMin(state.start)) state.end = minHHMM(toMin(state.start) + 120);
+  if (state.date === todayStr() && toMin(state.start) < nowMin()) {
+    state.start = minHHMM(Math.min(nowMin() + 30, LAST_START));
+    if (toMin(state.end) <= toMin(state.start)) state.end = minHHMM(23 * 60 + 59);
+  }
+}
+
+function paintStoreHead(el) {
+  const s = state.storeInfo; if (!s) return;
+  el.querySelector('#store-head').innerHTML = `
+    <div class="cell"><div class="c-main"><div class="c-title">营业</div></div>
+      <div class="c-extra"><span class="pill ${s.isOpen ? 'ok' : 'bad'}">${s.isOpen ? '营业中' : '已打烊'}</span> ${esc(hhmm(s.bizStart))}–${esc(hhmm(s.bizEnd))}</div></div>
+    <div class="cell"><div class="c-main"><div class="c-title">座位</div></div>
+      <div class="c-extra">已用 ${esc(String(s.seatUsed ?? '—'))} / 共 ${esc(String(s.seatAll ?? '—'))}</div></div>
+    <div class="cell tap" id="go-store"><div class="c-main"><div class="c-title" style="font-size:15px;color:var(--link)">门店详情 / 规则</div>
+      <div class="c-desc">单价、预约规则、取消规则、门店照片</div></div><span class="chev"></span></div>`;
+  el.querySelector('#go-store').onclick = () => push('store');
+  el.querySelector('#biz-hint').textContent = s.isOpen ? '营业中' : '已打烊';
+  paintQuickPicks(el);
+  const demand = s.demandMinutes ?? 60, max = s.maxMinutes ?? 720;
+  el.querySelector('#time-hint').innerHTML =
+    `最短 <b>${Math.round(demand / 60 * 10) / 10} 小时</b> · 最长 <b>${Math.round(max / 60)} 小时</b> · 可提前 <b>${s.demandDay ?? 5} 天</b>预约`;
+}
+
+function paintQuickPicks(el) {
+  const box = el.querySelector('#quick'); if (!box) return;
+  const closeMin = state.storeInfo ? toMin(hhmm(state.storeInfo.bizEnd) || '23:59') : 23 * 60 + 59;
+  const base = Math.max(nowMin() + 30, toMin(state.start) || nowMin() + 30);
+  const mk = [[base, 120, '2 小时'], [base, 240, '4 小时'], [base, 480, '8 小时'], [base, Math.max(60, closeMin - base), '到打烊']];
+  box.innerHTML = mk.map(([a, len, label], i) => {
+    const st = minHHMM(a), en = minHHMM(Math.min(a + (len > 1440 ? 240 : len), 23 * 60 + 59));
+    return `<div class="pick" data-s="${st}" data-e="${en}">${label}<span class="subtle" style="margin-left:4px">${st}</span></div>`;
+  }).join('');
+  box.querySelectorAll('.pick').forEach(p => p.onclick = () => {
+    state.start = p.dataset.s; state.end = p.dataset.e;
+    el.querySelector('#s').value = state.start; el.querySelector('#e').value = state.end;
+    reloadSeats();
+  });
+}
+
+function paintSeats(el) {
+  const host = el.querySelector('#seat-host');
+  if (!state.rooms.length) { host.innerHTML = '<div class="empty">这家店在这个时段没有返回座位数据</div>'; return; }
+  let free = 0, taken = 0;
+  host.innerHTML = '<div class="mapwrap">' + state.rooms.map(room => `
+    <div class="room-name">${esc(room.roomName || '楼层')} · ${room.seats.length} 座</div>
+    <div class="map" style="aspect-ratio:${room.imgW}/${room.imgH}">
+      ${room.img ? `<img src="${esc(room.img)}" alt="" loading="lazy">` : ''}
+      ${room.seats.map(s => {
+        const cls = s.taken ? (s.mine ? 'mine' : 'taken') : 'free';
+        if (s.taken) taken++; else free++;
+        // 有头像的占用座画头像，没头像的仍然写座号（别留一个空灰圈）
+        const showAv = !!(s.taken && s.photo);
+        const label = showAv ? '' : esc(s.seatName);
+        return `<button class="seat ${cls}${showAv ? ' hasav' : ''}" data-seat="${esc(s.seatId)}" data-space="${esc(s.spaceId)}"
+          data-sname="${esc(s.spaceName)}" data-name="${esc(s.seatName)}" data-taken="${s.taken ? 1 : 0}" data-mine="${s.mine ? 1 : 0}"
+          style="left:${(s.x / room.imgW * 100).toFixed(3)}%;top:${(s.y / room.imgH * 100).toFixed(3)}%;width:${(s.w / room.imgW * 100).toFixed(3)}%;height:${(s.h / room.imgH * 100).toFixed(3)}%"
+          title="${esc(s.spaceName)} ${esc(s.seatName)} 号${s.mine ? '（我的）' : s.taken ? '（已占用 · 点开看时段）' : ''}"
+          >${showAv ? `<span class="av" style="background-image:url('${esc(s.photo)}')"></span>` : label}</button>`;
+      }).join('')}
+    </div>`).join('')
+    + `<div class="tip" style="padding:0 4px 6px">可预约 <b style="color:var(--brand)">${free}</b> 座 · 已占用 <b>${taken}</b> 座${state.storeMeta ? ` · 该店共 ${state.storeMeta.seatAll ?? '—'} 座` : ''}<br>
+       <span class="subtle">点<b>占用的座位</b>可以看占座人头像和这个座被预约的时段。</span></div></div>`;
+  host.querySelectorAll('.seat.free').forEach(b => b.onclick = () => {
+    host.querySelectorAll('.seat.sel').forEach(x => x.classList.remove('sel'));
+    b.classList.add('sel');
+    state.selected = { seatId: b.dataset.seat, spaceId: b.dataset.space, seatName: b.dataset.name, spaceName: b.dataset.sname };
+    paintSticky(el);
+  });
+  // 占用座 / 我的座也可以点：看占座人头像 + 这个座被预约的时段
+  host.querySelectorAll('.seat.taken, .seat.mine').forEach(b => b.onclick = () => openOccupant(b, el));
+  if (state.selected) {
+    const b = host.querySelector(`.seat[data-seat="${CSS.escape(state.selected.seatId)}"]`);
+    if (b && !b.disabled) b.classList.add('sel');
+  }
+  paintSticky(el);
+}
+
+/* —— 点占用的座位：占座人头像 + 这个座被预约的时段 —— */
+// 平台只暴露占座人的头像和 userId，没有昵称/资料的只读接口（getUserInfo / getUserById 全 404），
+// 所以这里给的是「头像 + 座位 + 该座被占用的时段」，不假装能查到对方是谁。
+async function openOccupant(btn) {
+  const seatId = btn.dataset.seat, spaceId = btn.dataset.space;
+  const sname = btn.dataset.sname, name = btn.dataset.name;
+  openSheet(`
+    <div class="shd"><div class="st">${esc(sname)} ${esc(name)} 号</div><button class="sx" id="sh-x">×</button></div>
+    <div class="sbd"><div class="page-loading"><span class="spinner"></span> 正在读取这个座的占用情况…</div></div>`);
+  $('#sh-x').onclick = closeSheet;
+  let r;
+  try {
+    r = await jget(`/api/occupancy?storeId=${encodeURIComponent(state.store.storeId)}&spaceId=${encodeURIComponent(spaceId)}&seatId=${encodeURIComponent(seatId)}&date=${state.date}`);
+  } catch (e) { r = { ok: false, msg: e.message }; }
+  const sbd = $('#sheet .sbd'); if (!sbd) return;
+  if (!r || !r.ok) { sbd.innerHTML = `<div class="notice red" style="margin:12px">占用情况读取失败：${esc(r?.msg || '')}</div>`; return; }
+  const occ = r.occupant;
+  const avatar = occ && occ.photo ? esc(occ.photo) : '';
+  const stateTxt = r.isMine ? '我的座位' : (occ && occ.userId ? '已被占用' : '当前空闲');
+  const tone = r.isMine ? 'blue' : (occ && occ.userId ? 'mute' : 'ok');
+  const colors = { now: 'var(--price)', future: 'var(--brand)', past: 'var(--ink-3)', unknown: 'var(--ink-3)' };
+  const labels = { now: '占用中', future: '已被预约', past: '已过去', unknown: '—' };
+  const ranges = r.ranges || [];
+  sbd.innerHTML = `
+    <div class="group" style="margin-top:10px">
+      <div class="cell" style="min-height:76px;gap:14px">
+        ${avatar ? `<div class="avbig" style="background-image:url('${avatar}')"></div>`
+                 : `<div class="avbig" style="display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:22px">座</div>`}
+        <div class="c-main">
+          <div class="c-title">${esc(stateTxt)}</div>
+          <div class="c-desc">${esc(occ?.roomName || '')} · ${esc(sname)} ${esc(name)} 号${occ && occ.userId ? ` · userId 尾号 ${esc(String(occ.userId).slice(-6))}` : ''}</div>
+        </div>
+        <span class="pill ${tone}">${esc(r.busyNow ? '占用中' : '空闲')}</span>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-hd"><b>这个座被占用的时段</b><small class="subtle">共 ${ranges.length} 段 · 窗口 ${esc(String(r.window?.from || '').slice(0, 10))}</small></div>
+      <div class="rangelist">
+        ${ranges.length ? ranges.map(x => `
+          <div class="rangeitem">
+            <i class="rdot" style="background:${colors[x.state] || colors.unknown}"></i>
+            <span class="rtxt"><b>${esc(String(x.begin || x.raw).slice(5, 16))}</b> → ${esc(String(x.end || '').slice(5, 16))}</span>
+            <span class="subtle" style="color:${colors[x.state] || colors.unknown}">${esc(labels[x.state] || '')}</span>
+          </div>`).join('')
+          : '<div class="rangeitem"><span class="rtxt subtle">这个座在查询窗口内没有被预约的时段</span></div>'}
+      </div>
+      <div class="tip" style="padding-top:2px">
+        数据来自 <span class="mono">/seat/querySeatSpareTime</span> —— 接口名字叫「空闲时段」，
+        但实测返回的是<b>该座位已被预约的区间</b>（占用座给一段包含此刻的区间，空闲座只给未来区间）。
+        平台没有「查别人订单」的接口，所以看不到对方昵称，也看不到他在这家店的其它预约。
+      </div>
+    </div>`;
+}
+
+function paintSticky(el) {
+  const bar = el.querySelector('#sticky'); if (!bar) return;
+  const sel = state.selected;
+  if (!sel) { bar.classList.remove('on'); return; }
+  bar.classList.add('on');
+  const est = estimate();
+  el.querySelector('#st-k').textContent = `${sel.spaceName} ${sel.seatName} 号 · ${state.date} ${state.start}–${state.end}`;
+  el.querySelector('#st-v').innerHTML = `${durationMin()} 分钟（计费 ${billableMin(durationMin()) / 60} 小时）· 预估 <span class="money">${est == null ? '—' : '¥' + est.toFixed(2)}</span> → 月卡抵扣后 <span class="money">¥0</span>`;
+  const go = el.querySelector('#st-go');
+  go.disabled = false;
+  go.onclick = () => confirmOrder(el);
+}
+
+/* —— 这个店已被预约的时段：选座之前先看清什么时候是满的 —— */
+// live_situation 只说「谁占着」，一个时间字段都没有；时段只能逐座问 querySeatSpareTime。
+// 服务端 /api/agenda 已经把占用座的区间聚合好了（并发 8 条 + 缓存 60 秒）。
+async function paintAgenda(el) {
+  const host = el.querySelector('#agenda-host');
+  if (!host || !state.store) return;
+  host.innerHTML = '<div class="group"><div class="group-hd"><b>这个店已被预约的时段</b><small class="subtle">正在逐座询问…</small></div></div>';
+  let r;
+  try { r = await jget(`/api/agenda?storeId=${encodeURIComponent(state.store.storeId)}&date=${state.date}`); }
+  catch (e) { r = { ok: false, msg: e.message }; }
+  if (!host.isConnected) return;
+  if (!r || !r.ok) {
+    host.innerHTML = `<div class="group"><div class="group-hd"><b>这个店已被预约的时段</b><span class="pill bad">读取失败</span></div><div class="tip">${esc(r?.msg || '')}</div></div>`;
+    return;
+  }
+  const colors = { now: 'var(--price)', future: 'var(--brand)', past: 'var(--ink-3)', unknown: 'var(--ink-3)' };
+  const labels = { now: '占用中', future: '已被预约', past: '已过去', unknown: '—' };
+  const tones  = { now: 'bad', future: 'ok', past: 'mute', unknown: 'mute' };
+  const all = r.ranges || [];
+  const ahead = all.filter(x => x.state !== 'past');
+  const shown = ahead.length ? ahead : all;
+  const fmt = s => String(s || '').slice(5, 16);
+  host.innerHTML = `
+    <div class="group">
+      <div class="group-hd">
+        <b>这个店已被预约的时段</b>
+        <small class="subtle">${r.occupied}/${r.seatAll} 个座有人 · 共 ${all.length} 段${r.cached ? ' · 已缓存' : ''}</small>
+      </div>
+      <div class="rangelist">
+        ${shown.length ? shown.slice(0, 14).map((x, i) => `
+          <div class="rangeitem tap" data-ai="${i}">
+            <i class="rdot" style="background:${colors[x.state] || colors.unknown}"></i>
+            <span class="rtxt"><b>${esc(fmt(x.begin))}</b> → ${esc(fmt(x.end))}</span>
+            <span class="subtle">${x.seatCount} 个座</span>
+            <span class="pill ${tones[x.state] || 'mute'}">${esc(labels[x.state] || '')}</span>
+          </div>`).join('')
+          : '<div class="rangeitem"><span class="rtxt subtle">当前窗口里没有被预约的时段 —— 这一层都是空的</span></div>'}
+      </div>
+      ${shown.length > 14 ? `<div class="tip" style="padding-top:2px">还有 ${shown.length - 14} 段更靠后的预约没列出来。</div>` : ''}
+      <div class="tip" style="padding-top:2px">
+        点任意一行看是<b>哪几个座</b>被占着。数据来自 <span class="mono">/seat/querySeatSpareTime</span>
+        （逐座询问后聚合）。很多座是<b>月卡长期锁定</b>的，区间会跨好几个月，那不是 bug。
+      </div>
+    </div>`;
+  host.querySelectorAll('.rangeitem[data-ai]').forEach(row => row.onclick = () => {
+    const x = shown[Number(row.dataset.ai)];
+    if (!x) return;
+    openSheet(`
+      <div class="shd"><div class="st">${esc(fmt(x.begin))} → ${esc(fmt(x.end))}</div><button class="sx" id="ag-x">×</button></div>
+      <div class="sbd"><div class="group" style="margin-top:10px">
+        <div class="group-hd"><b>这段时间被占的 ${x.seatCount} 个座</b></div>
+        <div class="rangelist">
+          ${x.seats.map(s => `
+            <div class="rangeitem">
+              <i class="rdot" style="background:${s.mine ? 'var(--seat-mine)' : 'var(--seat-taken)'}"></i>
+              <span class="rtxt"><b>${esc(s.roomName || '')} · ${esc(s.spaceName || '')} ${esc(s.seatName)} 号</b>${s.mine ? ' <span class="pill blue">我的</span>' : ''}</span>
+            </div>`).join('')}
+        </div>
+        <div class="tip" style="padding-top:2px">平台不告诉你「是谁」，只看得到占座人的头像和 userId 尾号 —— 点座位图上的头像能看到。</div>
+      </div></div>`);
+    $('#ag-x').onclick = closeSheet;
+  });
+}
+
+AFTER.book = (el) => {
+  const d = el.querySelector('#d'), s = el.querySelector('#s'), e = el.querySelector('#e');
+  const onChange = () => {
+    if (d.value) state.date = d.value;
+    state.start = s.value; state.end = e.value;
+    reloadSeats();
+  };
+  [d, s, e].forEach(i => i.onchange = onChange);
+  if (state.storeInfo) paintStoreHead(el);
+  if (state.rooms.length) paintSeats(el);
+  paintQuickPicks(el);
+  paintLive(el);
+  paintAgenda(el);
+};
+
+/* —— 当前状况卡：门店此刻到底什么状态 + 我的订单能不能开门/开灯 —— */
+async function paintLive(el) {
+  const host = el.querySelector('#live-host'); if (!host || !state.store) return;
+  host.innerHTML = '<div class="livecard"><div class="lhd"><span class="ltitle">当前状况</span><span class="subtle">读取中…</span></div></div>';
+  let r;
+  try { r = await jget(`/api/live?storeId=${encodeURIComponent(state.store.storeId)}&date=${state.date}&start=${state.start}&end=${state.end}`); }
+  catch (e) { r = { ok: false, msg: e.message }; }
+  if (!host.isConnected) return;
+  const row = (k, v) => `<div class="lrow"><span>${k}</span><span style="text-align:right">${v}</span></div>`;
+  if (!r || !r.ok) {
+    host.innerHTML = `<div class="livecard"><div class="lhd"><span class="ltitle">当前状况</span><span class="pill bad">读取失败</span></div><div class="lfoot">${esc(r?.msg || '')}</div></div>`;
+    return;
+  }
+  const rooms = r.rooms || [];
+  const free = rooms.reduce((a, x) => a + x.free, 0), taken = rooms.reduce((a, x) => a + x.taken, 0);
+  const mineSeats = rooms.flatMap(x => x.mine || []);
+  const ao = r.activeOrder;
+  const lightTxt = ao ? (ao.lightOpenStatus === 1 ? '<b style="color:var(--brand)">已开</b>' : (ao.lightOpenStatus === 0 ? '<b>未开</b>' : '—')) : '—';
+  host.innerHTML = `
+    <div class="livecard">
+      <div class="lhd"><span class="ltitle">当前状况</span>
+        <span class="pill ${r.isOpen ? 'ok' : 'bad'}">${r.isOpen ? '营业中' : '已打烊'}</span></div>
+      ${row('服务端时间', `<span class="mono subtle">${esc(r.now)}</span>`)}
+      ${row('营业时间', `${esc(hhmm(r.bizStart))} – ${esc(hhmm(r.bizEnd))}`)}
+      ${row('此刻座位', `空 <b style="color:var(--brand)">${free}</b> · 占用 <b>${taken}</b>${rooms.length > 1 ? ` · ${rooms.length} 个房间` : ''}`)}
+      ${mineSeats.length ? row('我正占着的座', mineSeats.map(x => `<b>${esc(x.spaceName)} ${esc(x.seatName)} 号</b>`).join('、')) : ''}
+      ${ao ? row('我的订单', `<span class="pill ${['ok','warn','bad','mute','blue'].includes(ao.statusInfo?.tone) ? ao.statusInfo.tone : 'mute'}">${esc(ao.statusInfo?.label || ao.orderStatus)}</span>`)
+           + row('可操作', `<b>${esc(ao.spaceName || '')} ${esc(ao.seatName || '')} 号</b> · ${ao.date || ''} ${esc(hhmm(ao.begin))}–${esc(hhmm(ao.end))}`)
+        : row('我的订单', '<span class="subtle">这家店此刻没有能操作的订单</span>')}
+      ${row('灯光', ao ? lightTxt : '<span class="subtle">— 需要「已支付 / 使用中」的订单</span>')}
+      ${row('门锁', ao
+        ? `可开门时段：<b>${esc(ao.openWindowFrom || '—')}</b> 起${ao.canOpenNow ? ' · <b style="color:var(--brand)">现在可以开</b>' : ' · <b style="color:var(--price)">还没到点</b>'}`
+        : '<span class="subtle">— 需要「已支付 / 使用中」的订单</span>')}
+      <div class="lfoot">
+        数据来自 <span class="mono">/store/live_situation/query</span>（实时座位）、
+        <span class="mono">/store/live_situation/iz_open</span>（是否营业）、
+        <span class="mono">/queryOrderDetails</span>（灯光 / 开门窗口）。
+        ${r.isZero === true ? '这家店在月卡 <b>0 元覆盖</b>清单内。' : r.isZero === false ? '⚠ 这家店<b>不在</b> 0 元覆盖清单内。' : ''}
+      </div>
+    </div>`;
+}
+
+/* —— 预约详情页：开门 / 开灯 / 退座（都是真实硬件/座位操作）—— */
+AFTER.order = (el) => {
+  const o = state.orderDetail; if (!o) return;
+  const out = el.querySelector('#act-out');
+  const note = (cls, html) => { if (out) out.innerHTML = `<div class="notice ${cls}" style="margin:10px 12px 0">${html}</div>`; };
+  const busy = (btn, txt) => { const old = btn.textContent; btn.disabled = true; btn.textContent = txt; return () => { btn.disabled = false; btn.textContent = old; }; };
+  // 做完动作后回读服务端真值再重渲染这一页，避免界面停在旧状态
+  const refresh = async (cls, html) => {
+    try {
+      const q = await jget('/api/orders');
+      const fresh = (q.orders || []).find(x => x.orderId === o.orderId);
+      if (fresh) state.orderDetail = fresh;
+    } catch { }
+    render('order', 'none');
+    const p = viewport.querySelector('.page');
+    const o2 = p && p.querySelector('#act-out');
+    if (o2) o2.innerHTML = `<div class="notice ${cls}" style="margin:10px 12px 0">${html}</div>`;
+  };
+
+  const door = el.querySelector('#act-door');
+  const checkin = el.querySelector('#act-checkin');
+  const light = el.querySelector('#act-light');
+  const leave = el.querySelector('#act-leave');
+
+  if (checkin && !checkin.disabled) checkin.onclick = async () => {
+    if (!await confirmDialog({
+      title: '到店签到 · 立即入座',
+      body: `给这一单做「立即入座」？<br><br>
+        接口 <span class="mono">/seat/order/immediatelySeat</span>，和开门同一套距离校验（1km）。
+        成功后这一单会从「已支付」变成<b>「使用中」</b>，座位立刻显示成<b>占用中</b>。<br><br>
+        ⚠ 这一步等于告诉平台「我人到店坐下了」，座位被别人抢不掉，但你也<b>更难退</b>（退座仍要扣掉那 1 天）。`,
+      ok: '签到', danger: true,
+    })) return;
+    const done = busy(checkin, '签到中…');
+    const r = await jpost('/api/checkin', { orderId: o.orderId, confirm: true });
+    done();
+    await refresh(r.ok ? 'green' : 'red',
+      `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
+       <div class="mono" style="margin-top:6px;font-size:12px">提交 lat=${esc(String(r.sent?.lat))} lon=${esc(String(r.sent?.lon))} wifi=${esc(String(r.sent?.wifiName || '（空）'))} · innerCode=${esc(String(r.innerCode))}</div>`);
+  };
+
+  if (door && !door.disabled) door.onclick = async () => {
+    if (!await confirmDialog({
+      title: '开门 · 真实硬件指令',
+      body: `给「${esc(o.storeName || '')}」的门锁下发开门指令？<br><br>
+        服务端拿<b>提交的 lat/lon</b> 和门店坐标比直线距离，容差 1km。本工具提交的是订单自带的门店坐标，
+        所以距离≈0。通过后门锁才会动作；设备离线或没到可开门时间会被拒。`,
+      ok: '开门', danger: true,
+    })) return;
+    const done = busy(door, '开门中…');
+    const r = await jpost('/api/door', { orderId: o.orderId, confirm: true });
+    done();
+    await refresh(r.ok ? 'green' : 'red',
+      `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
+       <div class="mono" style="margin-top:6px;font-size:12px">提交 lat=${esc(String(r.sent?.lat))} lon=${esc(String(r.sent?.lon))} · deviceId ${esc(String(r.sent?.deviceId || '—'))} · data.code=${esc(String(r.code))}</div>`);
+  };
+
+  if (light && !light.disabled) light.onclick = async () => {
+    if (!await confirmDialog({
+      title: '开灯 / 关灯',
+      body: `下发灯光指令？<br><br><span class="mono">/seat/order/openLight</span> 是同一个接口，开还是关由服务端定。
+        当前 <span class="mono">lightOpenStatus = ${esc(String(o.lightOpenStatus ?? '—'))}</span>（0 = 未开）。`,
+      ok: '下发', danger: false,
+    })) return;
+    const done = busy(light, '下发中…');
+    const r = await jpost('/api/light', { orderId: o.orderId, confirm: true });
+    done();
+    await refresh(r.ok ? 'green' : 'red',
+      `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
+       <div class="mono" style="margin-top:6px;font-size:12px">lightOpenStatus ${esc(String(r.lightBefore))} → ${esc(String(r.lightAfter))}</div>`);
+  };
+
+  if (leave && !leave.disabled) leave.onclick = async () => {
+    if (!await confirmDialog({
+      title: '退座 · 不可逆',
+      body: `确定要退座？<br><br>会<b>立刻结束本次学习</b>并把座位释放掉，预约的结束时间被截断成现在。<br><br>
+        ⚠ <b>已扣的月卡天数不会退回</b>——卡是在「结算」那一步扣的，退座只结束使用。`,
+      ok: '退座', danger: true,
+    })) return;
+    if (!await confirmDialog({ title: '再确认一次', body: '真的要退座吗？这一步没法撤销。', ok: '确认退座', danger: true })) return;
+    const done = busy(leave, '退座中…');
+    const r = await jpost('/api/leave', { orderId: o.orderId, confirm: true });
+    done();
+    await refresh(r.ok ? 'green' : 'red', `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}`);
+  };
+};
+
+let seatReqId = 0;
+async function reloadSeats() {
+  const el = viewport.querySelector('.page');
+  if (!el || !state.store) return;
+  if (durationMin() <= 0) { el.querySelector('#seat-host').innerHTML = '<div class="notice red">开始时间要早于结束时间</div>'; return; }
+  const my = ++seatReqId;
+  state.selected = null;
+  el.querySelector('#sticky').classList.remove('on');
+  el.querySelector('#seat-host').innerHTML = '<div class="page-loading"><span class="spinner"></span> 正在获取座位图…</div>';
+  const r = await jget(`/api/seats?storeId=${state.store.storeId}&date=${state.date}&start=${state.start}&end=${state.end}`);
+  if (my !== seatReqId || !viewport.contains(el)) return;
+  if (!r.ok) { el.querySelector('#seat-host').innerHTML = `<div class="notice red">${esc(r.msg || '座位图获取失败')}</div>`; return; }
+  state.rooms = r.rooms; state.myUserId = r.myUserId; state.storeMeta = r.store;
+  if (r.prices && r.prices.length) state.prices = Object.fromEntries(r.prices.map(p => [p.spaceId, p.price]));
+  paintSeats(el);
+}
+
+/* —— 下单确认（半屏抽屉）—— */
+async function confirmOrder(el) {
+  const sel = state.selected;
+  if (!sel) return;
+  const dur = durationMin(), est = estimate();
+  const rule = state.cancelRule;
+  openSheet(`
+    <div class="shd"><div class="st">确认预约</div><button class="sx" id="sh-x">×</button></div>
+    <div class="sbd">
+      <div class="group" style="margin-top:10px">
+        <div class="kv" style="padding:12px 16px 4px"><span class="k">门店</span><span class="v">${esc(state.store.storeName)}</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">座位</span><span class="v">${esc(sel.spaceName)} ${esc(sel.seatName)} 号</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">时间</span><span class="v">${esc(state.date)} ${esc(state.start)}–${esc(state.end)}</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">时长</span><span class="v">${dur} 分钟（计费 ${billableMin(dur) / 60} 小时）</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">原价</span><span class="v money">${est == null ? '—' : '¥' + est.toFixed(2)}</span></div>
+        <div class="kv" style="padding:8px 16px 12px"><span class="k">月卡抵扣后</span><span class="v money">¥0.00</span></div>
+      </div>
+      <div class="notice green" style="margin:10px 12px">
+        下单会生成一张<b>待支付</b>订单，接着用月卡抵扣 → 实付 <b>¥0</b>、月卡扣 <b>1 天</b>、订单直接变<b>已支付</b>。
+      </div>
+      <div class="notice red" style="margin:10px 12px 16px">
+        <b>抵扣不可撤销</b>：平台没有取消 / 退卡接口，扣掉的 1 天要不回来。
+        ${rule ? `门店规则：开始前 ${rule.aheadCancelBookingMinutes ?? 30} 分钟以上取消不扣费。` : ''}
+        下单后可以在「预约」详情页开门 / 开灯 / 退座；退座会立刻结束学习、释放座位，但这 1 天也不会退回。
+      </div>
+    </div>
+    <div class="sfoot"><button class="btn block" id="sh-ok">确认下单</button></div>`);
+  $('#sh-x').onclick = closeSheet;
+  $('#sh-ok').onclick = () => doBook(sel);
+}
+
+async function doBook(sel) {
+  const btn = $('#sh-ok');
+  btn.disabled = true; btn.textContent = '下单中…';
+  const r = await jpost('/api/book', {
+    storeId: state.store.storeId, spaceId: sel.spaceId, seatId: sel.seatId,
+    date: state.date, start: state.start, end: state.end,
+  });
+  if (!r.ok) {
+    btn.disabled = false; btn.textContent = '重试';
+    $('#sheet .sbd').insertAdjacentHTML('afterbegin', `<div class="notice red" style="margin:10px 12px">❌ ${esc(r.msg || '下单失败')}</div>`);
+    toast('下单失败');
+    return;
+  }
+  state.lastOrder = r.orderId;
+  fillSheetResult(r);
+}
+
+function fillSheetResult(r) {
+  const canSettle = r.canSettleWithCard;
+  openSheet(`
+    <div class="shd"><div class="st">${canSettle ? '订单已生成 · 待支付' : '订单已生成'}</div><button class="sx" id="sh-x">×</button></div>
+    <div class="sbd">
+      <div class="group" style="margin-top:10px">
+        <div class="kv" style="padding:12px 16px 4px"><span class="k">订单号</span><span class="v mono">${esc(r.orderId)}</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">门店</span><span class="v">${esc(r.store || state.store.storeName)}</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">时间</span><span class="v">${esc(state.date)} ${esc(state.start)}–${esc(state.end)}</span></div>
+        <div class="kv" style="padding:8px 16px"><span class="k">应付</span><span class="v money">${yuan(r.payAmtYuan)}</span></div>
+        <div class="kv" style="padding:8px 16px 12px"><span class="k">月卡抵扣后</span><span class="v money">${canSettle ? '¥0.00' : '—'}</span></div>
+      </div>
+      ${canSettle ? `<div class="notice green" style="margin:10px 12px">${esc(r.settleWithCardHint || '')}</div>` : ''}
+      ${r.warn ? `<div class="notice red" style="margin:10px 12px">${esc(r.warn)}</div>` : ''}
+      <div class="notice red" style="margin:10px 12px 16px">
+        抵扣后订单直接变「已支付」，月卡少 1 天，<b>不可撤销</b>。开门仍在原 App。
+      </div>
+    </div>
+    <div class="sfoot">
+      ${canSettle
+        ? `<button class="btn block" id="sh-settle">用月卡抵扣（扣 1 天）</button>`
+        : `<button class="btn block ghost" id="sh-x2">知道了，去原 App 处理</button>`}
+    </div>`);
+  $('#sh-x').onclick = closeSheet;
+  if ($('#sh-x2')) $('#sh-x2').onclick = closeSheet;
+  if ($('#sh-settle')) $('#sh-settle').onclick = () => doSettle(r.orderId, r.payAmtYuan);
+}
+
+async function doSettle(orderId, payYuan) {
+  const ok = await confirmDialog({
+    title: '用月卡抵扣？',
+    body: `订单 <span class="mono">${esc(orderId)}</span><br>
+      原价 <b>${yuan(payYuan)}</b> → 实付 <b class="red">¥0</b>，月卡扣 <b>1 天</b><br><br>
+      <span class="red">抵扣后订单直接变「已支付」。</span>平台没有取消 / 退卡接口，<b>扣掉的天数要不回来</b>。`,
+    ok: '确认抵扣', cancel: '再想想', danger: true,
+  });
+  if (!ok) return;
+  const btn = $('#sh-settle');
+  if (btn) { btn.disabled = true; btn.textContent = '抵扣中…'; }
+  const r = await jpost('/api/settle', { orderId });
+  if (r.ok) {
+    closeSheet();
+    toast('抵扣成功 · 实付 ¥0');
+    loadOrders(true);
+    setTimeout(() => go('orders'), 400);
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = '重试抵扣'; }
+    $('#sheet .sbd').insertAdjacentHTML('afterbegin', `<div class="notice red" style="margin:10px 12px">❌ ${esc(r.msg || '抵扣失败')}</div>`);
+    toast('抵扣未成功');
+  }
+}
+
+/* —— 我的预约 —— */
+AFTER.orders = (el) => {
+  loadOrders();
+  paintHistory(el);
+  const tg = el.querySelector('#oid-toggle'), pn = el.querySelector('#oid-panel'), ch = el.querySelector('#oid-chev');
+  if (tg && pn) tg.onclick = () => {
+    const opening = pn.style.display === 'none';
+    pn.style.display = opening ? 'block' : 'none';
+    if (ch) ch.classList.toggle('down', opening);
+    if (opening) setTimeout(() => el.querySelector('#oid')?.focus(), 60);
+  };
+  const go = el.querySelector('#oid-go'), inp = el.querySelector('#oid');
+  if (go) go.onclick = () => lookupOrder(el);
+  if (inp) inp.onkeydown = e => { if (e.key === 'Enter') lookupOrder(el); };
+};
+
+/* —— 本机订单记录：getUserTogether 只返回活跃单，结束的就从列表消失，
+      所以在本地留一份足迹（localStorage），点一下就能回查 —— */
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem('wzz.orderHistory') || '[]'); } catch (e) { return []; }
+}
+function pushHistory(o) {
+  if (!o || !o.orderId) return;
+  const list = loadHistory().filter(x => x.orderId !== o.orderId);
+  list.unshift({
+    orderId: o.orderId, storeName: o.storeName, area: o.area, spaceName: o.spaceName, seatName: o.seatName,
+    date: o.date, begin: o.begin, end: o.end, orderStatus: o.orderStatus, savedAt: Date.now(),
+  });
+  try { localStorage.setItem('wzz.orderHistory', JSON.stringify(list.slice(0, 30))); } catch (e) {}
+}
+
+function paintHistory(el) {
+  const box = el.querySelector('#order-hist');
+  if (!box) return;
+  const active = new Set((state.orders || []).map(o => o.orderId));
+  const hist = loadHistory().filter(h => h.orderId && !active.has(h.orderId));
+  if (!hist.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="group">
+    <div class="group-hd"><b>本机记录</b><span>已结束 / 已退座的单，点开可回查</span></div>
+    ${hist.map((h, i) => `<div class="ocard hist" data-h="${i}">
+      <div class="ohd"><div class="oshop">${esc(h.storeName || '未知门店')}</div>
+        <span class="pill ${Number(h.orderStatus) === 8 ? 'mute' : 'blue'}">${Number(h.orderStatus) === 8 ? '已结束' : '状态 ' + esc(String(h.orderStatus))}</span></div>
+      <div class="obody"><b>${esc(h.spaceName || '')} ${esc(h.seatName || '')} 号</b> · ${esc(h.date || '')} ${esc(hhmm(h.begin))}–${esc(hhmm(h.end))}</div>
+      <div class="ofoot"><span class="subtle mono">${esc(String(h.orderId))}</span><span class="chev"></span></div>
+    </div>`).join('')}
+  </div>`;
+  box.querySelectorAll('.ocard.hist').forEach(c => c.onclick = async () => {
+    const h = hist[+c.dataset.h];
+    toast('正在回查…');
+    const r = await jget('/api/order?orderId=' + encodeURIComponent(h.orderId));
+    if (!r.ok) { toast(r.msg || '查不到这一单', 'wide'); return; }
+    state.orderDetail = r.order;
+    if (r.payAmtFen != null) state.orderDetail.payAmtYuan = r.payAmtFen / 100;
+    pushHistory(state.orderDetail);
+    push('order');
+  });
+}
+
+/* —— 按订单号查单：查那些已经不在「当前预约」里的单 —— */
+async function lookupOrder(el) {
+  const orderId = (el.querySelector('#oid')?.value || '').trim();
+  if (!orderId) { toast('先填订单号'); return; }
+  const r = await jget('/api/order?orderId=' + encodeURIComponent(orderId));
+  if (!r.ok) { toast(r.msg || '查不到这一单', 'wide'); return; }
+  state.orderDetail = r.order;
+  if (r.payAmtFen != null) state.orderDetail.payAmtYuan = r.payAmtFen / 100;
+  pushHistory(state.orderDetail);
+  push('order');
+}
+
+async function loadOrders(force) {
+  const r = await jget('/api/orders');
+  const box = viewport.querySelector('#order-list');
+  if (!box) return;
+  if (!r.ok) { box.innerHTML = `<div class="notice red" style="margin:12px 12px 0">预约加载失败：${esc(r.msg || '')}</div>`; setBadge(0); return; }
+  state.orders = r.orders || [];
+  (r.orders || []).forEach(pushHistory);
+  setBadge(state.orders.filter(o => o.orderStatus === 1).length);
+  if (!state.orders.length) {
+    box.innerHTML = `<div class="empty">
+      <svg width="54" height="54" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8.5 8.5h7M8.5 12.5h7"/></svg>
+      <div>还没有预约</div>
+      <div class="subtle" style="margin-top:6px">去「门店」挑一家 0 元店，选座下单</div>
+    </div>`;
+    return;
+  }
+  box.innerHTML = state.orders.map((o, i) => {
+    const si = o.statusInfo || {};
+    const tone = ['ok', 'warn', 'bad', 'mute', 'blue'].includes(si.tone) ? si.tone : 'mute';
+    return `<div class="ocard" data-i="${i}">
+      <div class="ohd"><div class="oshop">${esc(o.storeName || '未知门店')}</div>
+        <span class="pill ${tone}">${esc(si.label || '状态 ' + o.orderStatus)}</span></div>
+      <div class="obody">
+        <b>${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</b> · ${esc(o.date || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}<br>
+        <span class="subtle mono">${esc(o.orderId)}</span>
+      </div>
+      <div class="ofoot">
+        <span>orderStatus = ${esc(String(o.orderStatus))}${o.cardTypeName ? ' · ' + esc(o.cardTypeName) : ''}${o.lightOpenStatus != null ? ' · 灯' + (o.lightOpenStatus === 1 ? '已开' : '未开') : ''}</span>
+        <span>${[3, 6].includes(Number(o.orderStatus)) ? '<b style="color:var(--brand)">可开门</b> · ' : ''}查看详情 <span class="chev" style="display:inline-block"></span></span>
+      </div>
+    </div>`;
+  }).join('') + `<div class="tip" style="padding-bottom:24px">${state.orders.some(o => o.orderStatus === 1)
+    ? '有<b>待支付</b>订单：点进去可以看到订单号，抵扣请在「门店 → 选座」流程里做，或直接在原 App 支付。'
+    : '点进详情页可以直接<b>开门 / 开灯 / 退座</b>（真实硬件与座位操作）。平台没有取消 / 改签接口，那两项仍需回原 App。'}</div>`;
+  box.querySelectorAll('.ocard').forEach(c => c.onclick = () => {
+    state.orderDetail = state.orders[+c.dataset.i];
+    push('order');
+  });
+}
+
+function setBadge(n) {
+  const b = $('#tab-badge');
+  b.hidden = !n; b.textContent = n > 99 ? '99+' : n;
+}
+
+/* —— 门店详情页 / token 页的副作用 —— */
+/* —— 我的页：内嵌换 token + 人脸建档 —— */
+function shrinkToSquare(file, size = 720, q = 0.88) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error('读文件失败'));
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('这不是能解码的图片'));
+      img.onload = () => {
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        if (!side) return reject(new Error('图片尺寸为 0'));
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = size;
+        cv.getContext('2d').drawImage(
+          img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+        resolve(cv.toDataURL('image/jpeg', q));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+AFTER.me = (el) => {
+  /* —— 内嵌 JWT 面板 —— */
+  const tg = el.querySelector('#tok-toggle'), pn = el.querySelector('#tok-panel'), ch = el.querySelector('#tok-chev');
+  if (tg && pn) {
+    tg.onclick = () => {
+      const opening = pn.style.display === 'none';
+      pn.style.display = opening ? 'block' : 'none';
+      if (ch) ch.classList.toggle('down', opening);
+      if (opening && !pn.dataset.loaded) { pn.dataset.loaded = '1'; scanHars(el); }
+    };
+  }
+  const hr = el.querySelector('#har-refresh');
+  if (hr) hr.onclick = () => scanHars(el);
+  const ts = el.querySelector('#tok-save');
+  if (ts) ts.onclick = async () => {
+    const v = (el.querySelector('#tok-paste').value || '').trim();
+    if (!v) { toast('先粘贴内容'); return; }
+    await saveToken(el, (v.startsWith('{') || v.includes('"log"')) ? { harText: v } : { token: v });
+  };
+
+  /* —— 人脸建档 —— */
+  const drop = el.querySelector('#face-drop'), file = el.querySelector('#face-file');
+  const go = el.querySelector('#face-go'), prev = el.querySelector('#face-prev'), hint = el.querySelector('#face-hint');
+  if (drop && file && go) {
+    let dataUrl = null;
+    drop.onclick = () => file.click();
+    file.onchange = async () => {
+      const f = file.files && file.files[0];
+      if (!f) return;
+      if (f.type && !/^image\//.test(f.type)) { toast('只能选图片'); return; }
+      hint.innerHTML = '正在压缩…';
+      try {
+        dataUrl = await shrinkToSquare(f, 720, 0.88);
+        prev.src = dataUrl; prev.style.display = 'block';
+        drop.classList.add('has');
+        hint.innerHTML = '已选好 · ' + Math.round(dataUrl.length / 1024) + 'KB（已裁成方图）<div class="fd-ok">点下面按钮上传</div>';
+        go.disabled = false;
+      } catch (e2) {
+        dataUrl = null; go.disabled = true; drop.classList.remove('has'); prev.style.display = 'none';
+        hint.innerHTML = '这张图读不了：' + esc(e2.message) + '<br>换一张再试';
+      }
+    };
+    go.onclick = async () => {
+      if (!dataUrl) return;
+      const ok = await confirmDialog({
+        title: '上传人脸照片',
+        body: '会把这张照片传到平台 OSS 并建立人脸档。<br>平台<b>没有删除接口</b>，重复上传会覆盖旧的脸。继续？',
+        ok: '上传', danger: true,
+      });
+      if (!ok) return;
+      go.disabled = true; go.textContent = '上传中…';
+      const out = el.querySelector('#face-out');
+      out.innerHTML = '<div class="notice blue">正在上传（先传 OSS，再建档）…</div>';
+      let r;
+      try { r = await jpost('/api/face', { dataUrl, confirm: true }); }
+      catch (e2) { r = { ok: false, msg: e2.message }; }
+      if (!el.isConnected) return;
+      out.innerHTML = `<div class="notice ${r.ok ? 'green' : 'red'}">
+        ${r.ok ? '✅ ' : '❌ '}${esc(r.msg || '')}
+        ${r.uploadedUrl ? `<br><span class="subtle">OSS 字段名 <b>${esc(r.uploadField || '?')}</b> · ${Math.round((r.imageBytes || 0) / 1024)}KB</span>` : ''}
+        ${r.createCode != null ? `<br><span class="subtle">/user-face/create → code ${esc(String(r.createCode))} ${esc(r.createMsg || '')}</span>` : ''}
+      </div>`;
+      go.disabled = false; go.textContent = '上传并建立人脸档';
+      if (r.ok) toast('人脸档已建立');
+    };
+  }
+};
+
+AFTER.token = async (el) => {
+  el.querySelector('#har-refresh').onclick = () => scanHars(el);
+  el.querySelector('#tok-save').onclick = async () => {
+    const v = el.querySelector('#tok-paste').value.trim();
+    if (!v) { toast('先粘贴内容'); return; }
+    const body = v.trim().startsWith('{') || v.includes('"log"') ? { harText: v } : { token: v };
+    await saveToken(el, body);
+  };
+  scanHars(el);
+};
+
+async function scanHars(el) {
+  const box = el.querySelector('#har-list');
+  box.innerHTML = '<div class="page-loading"><span class="spinner"></span> 正在扫描 Downloads 里的 .har…</div>';
+  const r = await jget('/api/hars');
+  if (!el.isConnected || !box.isConnected) return;
+  if (!r.ok || !r.files.length) {
+    box.innerHTML = `<div class="tip">没在 ${(r.dirs || ['~/Downloads']).map(esc).join(' / ')} 里找到王知之的抓包文件。<br>把新的 .har 放到 Downloads 就能在这里看到。</div>`;
+    return;
+  }
+  const bestExp = r.files[0].exp;
+  box.innerHTML = r.files.map((f, i) => `
+    <div class="haritem ${i === 0 ? 'on' : ''}" data-file="${esc(f.file)}">
+      <span class="radio"></span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14.5px;word-break:break-all">${esc(f.name)} ${i === 0 && f.exp === bestExp ? '<span class="pill ok">最新</span>' : ''} ${f.expired ? '<span class="pill bad">已过期</span>' : ''}</div>
+        <div class="subtle">${esc(f.mtimeStr)} · ${f.sizeMB}MB · token 至 ${esc(f.expStr)}（剩 ${f.daysLeft} 天）${f.hasUa ? ' · 含 UA' : ''}</div>
+      </div>
+    </div>`).join('') + `<div class="btn-row"><button class="btn" id="har-use">用选中的抓包更新 token</button></div>`;
+  let pick = r.files[0];
+  box.querySelectorAll('.haritem').forEach(it => it.onclick = () => {
+    box.querySelectorAll('.haritem').forEach(x => x.classList.remove('on'));
+    it.classList.add('on');
+    pick = r.files.find(f => f.file === it.dataset.file);
+  });
+  box.querySelector('#har-use').onclick = () => saveToken(el, { harPath: pick.file });
+}
+
+async function saveToken(el, body) {
+  const out = el.querySelector('#tok-result');
+  out.innerHTML = '<div class="notice blue">正在校验并保存…</div>';
+  const r = await jpost('/api/token', body);
+  if (!el.isConnected) return;
+  out.innerHTML = `<div class="notice ${r.ok ? (r.alive ? 'green' : 'red') : 'red'}">
+    ${r.ok ? (r.alive ? '✅ ' : '⚠ ') : '❌ '}${esc(r.msg || '')}
+    ${r.ok && r.token ? `<br><span class="subtle">有效期至 ${esc(r.token.expStr)}（剩 ${r.token.daysLeft} 天）· userId ${esc(r.token.myUserId || '—')}</span>` : ''}
+  </div>`;
+  if (r.ok) {
+    toast(r.alive ? 'token 已更新' : 'token 已写入');
+    const st = await jget('/api/status');
+    if (st.ok) { state.status = st; paintTabBadge(st); }
+  }
+}
+
+function paintTabBadge(s) {
+  const t = s.token || {};
+  const alive = s.tokenAlive;
+  if (!$('#tab-badge')) return;
+  // tabBar 上只在有待支付订单时显示红点，token 状态放「我的」页
+  state.status = s;
+}
+
+/* ---------------- 启动 ---------------- */
+(async function init() {
+  // 状态栏时间
+  const tick = () => {
+    const d = new Date();
+    $('#sb-time').textContent = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  tick(); setInterval(tick, 20000);
+
+  // 顶部安全区：给 viewport 上的页面留出底部空间
+  resetTimes();
+  go('stores');
+
+  const st = await jget('/api/status');
+  if (st.ok) {
+    state.status = st;
+    if (!st.tokenAlive) {
+      setTimeout(() => toast(st.probeMsg ? 'token 失效：' + st.probeMsg : 'token 失效，去「我的 → 更新 token」', 'wide'), 700);
+    }
+  } else {
+    setTimeout(() => toast('连不上本机服务，确认 node book.mjs 在跑', 'wide'), 500);
+  }
+  loadOrders();   // 预热 tabBar 红点
+})();
+</script>
+</body>
+</html>
