@@ -626,7 +626,13 @@ $('#nav-back').onclick = back;
 /* ---------------- 小工具 ---------------- */
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 const yuan = v => v == null ? '—' : '¥' + Number(v).toFixed(2);
-const hhmm = t => String(t || '').slice(0, 5);
+// 取 HH:mm。平台各处给的时间格式不一致：/api/order 给 '10:00'，
+// 而 order 历史（querySeatOrderList.startTime）给 '2026-10-17 10:00:00'。
+// 旧写法 slice(0,5) 会把后者截成 '2026-'，历史卡片显示成「2026-–2026-」。
+const hhmm = t => {
+  const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
+  return m ? m[1].padStart(2, '0') + ':' + m[2] : '';
+};
 const toMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
 // 夹在 00:00~23:59 内 —— 否则深夜算窗口会算出 "24:26" 这种非法时间（实测踩过）
 const minHHMM = m => { const v = Math.max(0, Math.min(23 * 60 + 59, Math.round(Number(m) || 0)));
@@ -1489,7 +1495,12 @@ AFTER.order = (el) => {
     if (!body) return;
     if (!r.ok) { body.innerHTML = `<div class="notice red" style="margin:12px">座位拉取失败：${esc(r.msg || '')}</div>`; return; }
     const free = [];
-    (r.rooms || []).forEach(rm => (rm.seats || []).forEach(x => { if (!x.taken) free.push({ ...x, roomName: rm.roomName }); }));
+    (r.rooms || []).forEach(rm => (rm.seats || []).forEach(x => {
+      if (x.taken) return;
+      // 别把「现在坐着的这个座」列进去——它不是「换」的目标
+      if (o.seatId != null && String(x.seatId) === String(o.seatId)) return;
+      free.push({ ...x, roomName: rm.roomName });
+    }));
     if (!free.length) { body.innerHTML = '<div class="notice gray" style="margin:12px">这个时段没有别的空座了</div>'; return; }
     body.innerHTML = `<div class="group" style="margin:0">${free.map(x => `
       <div class="cell tap" data-seat="${esc(x.seatId)}" data-space="${esc(x.spaceId)}" data-name="${esc(x.seatName)}" data-sname="${esc(x.spaceName)}">
@@ -1750,7 +1761,7 @@ function paintHistory(el) {
     ${hist.map((h, i) => `<div class="ocard hist" data-h="${i}">
       <div class="ohd"><div class="oshop">${esc(h.storeName || '未知门店')}</div>
         <span class="pill ${Number(h.orderStatus) === 8 ? 'mute' : 'blue'}">${Number(h.orderStatus) === 8 ? '已结束' : '状态 ' + esc(String(h.orderStatus))}</span></div>
-      <div class="obody"><b>${esc(h.spaceName || '')} ${esc(h.seatName || '')} 号</b> · ${esc(h.date || '')} ${esc(hhmm(h.begin))}–${esc(hhmm(h.end))}</div>
+      <div class="obody"><b>${esc(h.spaceName || '')} ${esc(h.seatName || '')} 号</b> · ${esc(String(h.date || h.day || '').slice(0, 10))} ${esc(hhmm(h.begin))}–${esc(hhmm(h.end))}</div>
       <div class="ofoot"><span class="subtle mono">${esc(String(h.orderId))}</span><span class="chev"></span></div>
     </div>`).join('')}
   </div>`;
