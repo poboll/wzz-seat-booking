@@ -2,7 +2,9 @@
 /**
  * 王知之自习室 · 本地选座下单助手（仅自用）
  * ============================================================
- *  运行：node book.mjs   然后浏览器打开 http://127.0.0.1:8790
+ *  运行：node book.mjs              然后浏览器打开 http://127.0.0.1:8790
+ *        node book.mjs --lan        监听 0.0.0.0，同一 WiFi 下手机也能看：http://<你的局域网IP>:8790
+ *        （--lan 等价于 WZZ_HOST=0.0.0.0；端口可用 WZZ_PORT 改，默认 8790）
  *
  *  设计目标
  *  --------
@@ -39,9 +41,28 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ======================= CONFIG =======================
+// ---- 监听地址 ----
+// 默认只监听本机（安全）。想在手机上看效果（同一 WiFi）再开局域网：
+//     node book.mjs --lan        或        WZZ_HOST=0.0.0.0 node book.mjs
+// 端口：WZZ_PORT=xxxx（默认 8790）
+// ⚠ 开放到局域网后，同网段任何设备都能操作这个账号（token 存在服务端），看完请改回本机模式。
+function resolveHost() {
+  if (process.argv.slice(2).includes('--lan')) return '0.0.0.0';
+  return String(process.env.WZZ_HOST || '').trim() || '127.0.0.1';
+}
+function lanIPv4() {
+  const out = [];
+  for (const [name, list] of Object.entries(os.networkInterfaces() || {})) {
+    for (const i of list || []) {
+      if (i.family === 'IPv4' && !i.internal) out.push({ name, address: i.address });
+    }
+  }
+  return out;
+}
+
 const CONFIG = {
-  port: 8790,
-  host: '127.0.0.1',            // 只监听本机，不要改成 0.0.0.0
+  port: Number(process.env.WZZ_PORT || 8790),
+  host: resolveHost(),
   appId: 'wxa5cf43f677b9a059',
   base: 'https://wxa.wangzhizhi.mored.tech/opsli-boot/api/v1/applet',
 
@@ -189,8 +210,25 @@ function cityOf(areaName = '') {
   return '未知';
 }
 
+// 平台的数据里偶发把区名重复一遍，官方小程序拿到的原样就是这样：
+//   '重庆市重庆市渝北区'                （getStoreBrief / getStoreDetail 的 storeAreaName）
+//   '重庆市渝北区重庆市渝北区山茶路…'   （/card/available-stores 的 storeAreaName）
+// 前者是「市区重了」，后者是「区名前缀重了」。这里统一折叠掉重复前缀，
+// 否则门店列表/门店详情会显示成「重庆市渝北区重庆市渝北区山茶路…」。
+function dedupeAddr(s = '') {
+  let a = String(s || '').trim();
+  // 「市辖区」是平台塞的占位符，后面往往又跟了真正的市+区，先去掉
+  a = a.replace(/市辖区/g, '');
+  // 把连写两遍的「市/区/县」折叠成一遍：
+  //   「重庆市重庆市渝北区」            → 「重庆市渝北区」
+  //   「安徽省蚌埠市蚌埠市蚌山区…」      → 「安徽省蚌埠市蚌山区…」
+  a = a.replace(/([\u4e00-\u9fa5]{2,6}(?:市|区|县))\1/g, '$1');
+  return a;
+}
+
 function normalizeStore(row) {
-  const addr = row.storeAreaName || '';
+  // 字段优先级：storeAreaAll/storeAreaTotal 是完整地址；商店列表接口只有 storeAreaName。
+  const addr = dedupeAddr(row.storeAreaAll || row.storeAreaTotal || row.storeAreaName || '');
   return {
     storeId: String(row.storeId ?? row.id),
     storeName: row.storeName,
@@ -1482,7 +1520,13 @@ server.listen(CONFIG.port, CONFIG.host, async () => {
   const t = decodeToken(a.token);
   console.log('');
   console.log('  ◆ 王知之自习室 · 本地选座下单助手');
-  console.log(`  → 打开 http://${CONFIG.host}:${CONFIG.port}`);
+  console.log(`  → 本机   http://127.0.0.1:${CONFIG.port}`);
+  if (CONFIG.host === '0.0.0.0') {
+    const ips = lanIPv4();
+    if (ips.length) for (const i of ips) console.log(`  → 局域网 http://${i.address}:${CONFIG.port}   (${i.name})`);
+    else console.log('  ⚠ 没找到局域网 IPv4 地址（检查 WiFi 是否连上）');
+    console.log('  ⚠ 已开放到局域网：同一网络下任何设备都能操作这个账号。看完请去掉 --lan。');
+  }
   console.log(`  → token 来源：${a.source || 'auth.json'}`);
   if (t) console.log(`  → token 有效期至 ${new Date(t.exp * 1000).toLocaleString('zh-CN', { hour12: false })}（剩 ${Math.floor((t.exp * 1000 - Date.now()) / 86400000)} 天）`);
   else console.log('  ⚠ token 解析失败，请检查 auth.json');

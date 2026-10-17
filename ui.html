@@ -254,7 +254,7 @@ img{display:block}
   font-size:14px;color:var(--ink);border:.5px solid transparent;
 }
 .pick:active{background:#ECECEC}
-.pick.on{background:#E8EFFC;color:#06864A;border-color:#B7E4CC;font-weight:500}
+.pick.on{background:#E8EFFC;color:#0052D9;border-color:#B7CCF5;font-weight:600}
 .inputs{display:flex;gap:10px;padding:0 var(--pad) 12px}
 .inp{flex:1;min-width:0;background:var(--fill);border-radius:9px;padding:7px 10px}
 .inp label{display:block;font-size:11px;color:var(--ink-3);margin-bottom:1px}
@@ -498,6 +498,39 @@ img{display:block}
 .tap-link{color:var(--link);cursor:pointer;font-size:13.5px;font-weight:400;flex:0 0 auto}
 .tap-link:active{opacity:.55}
 .chev.down{transform:translateY(-1px) rotate(90deg)}
+
+/* ==================== 预订页重做（门店卡 / 时段 / 座位卡） ==================== */
+.shopcard{position:relative;margin:12px;background:var(--card);border-radius:var(--r);overflow:hidden;
+  box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.shop-banner{height:120px;background:#F2F2F2 center/cover no-repeat}
+.shop-body{padding:13px var(--pad) 5px}
+.shop-name{font-size:17.5px;font-weight:600;color:var(--ink);line-height:1.32;letter-spacing:-.2px}
+.shop-addr{font-size:13px;color:var(--ink-2);margin-top:4px;line-height:1.5}
+.shop-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.shop-tags .pill{font-size:11.5px;padding:2.5px 9px}
+.shop-swap{position:absolute;top:12px;right:12px;height:29px;padding:0 13px;border:0;border-radius:15px;
+  background:rgba(0,0,0,.44);color:#fff;font-size:12.5px;line-height:29px;backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);font-family:inherit}
+.shop-swap:active{background:rgba(0,0,0,.66)}
+.shopcard .cell:first-child::after,.shopcard #store-head .cell::after{left:var(--pad)}
+
+/* 时段行 */
+.durline{padding:0 var(--pad) 11px;font-size:13.5px;color:var(--ink-2);line-height:1.55}
+.durline b{color:var(--ink);font-weight:600}
+.durline .free{color:var(--brand);font-weight:600}
+.durline .money{color:var(--price);font-weight:600}
+
+/* 座位卡 */
+.seatgroup{padding-bottom:2px}
+.seatgroup .mapwrap{margin:0;border-radius:0;padding:6px 0 0;background:transparent}
+#seat-count{font-size:12.5px;color:var(--ink-2)}
+.seatgroup .legend{margin:8px 12px 12px}
+.seatgroup .anchorbar{margin:0 12px 10px}
+
+/* 席位/时段通用卡头更清爽 */
+.group-hd{padding:14px var(--pad) 6px;display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.group-hd b{font-weight:600;font-size:15px;color:var(--ink)}
+.group-hd span,.group-hd small{font-size:12.5px;color:var(--ink-3)}
 </style>
 </head>
 <body>
@@ -633,6 +666,24 @@ const hhmm = t => {
   const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
   return m ? m[1].padStart(2, '0') + ':' + m[2] : '';
 };
+
+/* 订单状态中文：优先用服务端给的 statusInfo.label，兜底用本地表。
+   以前卡片上直接印「orderStatus = 4」，用户看不懂，这里统一转译。 */
+const STATUS_ZH = {
+  1: '待支付', 2: '待支付', 3: '已支付（待使用）',
+  4: '已取消', 5: '已关闭', 6: '使用中', 7: '已退款', 8: '已结束',
+};
+const STATUS_TONE = { 1: 'warn', 2: 'warn', 3: 'ok', 4: 'mute', 5: 'mute', 6: 'blue', 7: 'mute', 8: 'mute' };
+function statusText(code, info) {
+  if (info && info.label) return info.label;
+  const n = Number(code);
+  if (STATUS_ZH[n]) return STATUS_ZH[n];
+  return code == null ? '状态未知' : '状态 ' + code;
+}
+function statusTone(code, info) {
+  if (info && ['ok', 'warn', 'bad', 'mute', 'blue'].includes(info.tone)) return info.tone;
+  return STATUS_TONE[Number(code)] || 'mute';
+}
 const toMin = t => { const [h, m] = String(t || '0:0').split(':').map(Number); return h * 60 + (m || 0); };
 // 夹在 00:00~23:59 内 —— 否则深夜算窗口会算出 "24:26" 这种非法时间（实测踩过）
 const minHHMM = m => { const v = Math.max(0, Math.min(23 * 60 + 59, Math.round(Number(m) || 0)));
@@ -736,41 +787,58 @@ PAGES.book = () => {
   </div>`;
   return `
   <div class="page-inner">
-    <div class="group">
-      <div class="cell tap" id="go-stores">
-        <div class="c-main">
-          <div class="c-title store-name">${esc(state.store?.storeName || '—')}</div>
-          <div class="c-desc store-addr">${esc(state.store?.addr || '')}</div>
-        </div>
-        <span class="c-extra">换门店<span class="chev"></span></span>
+    <div class="shopcard">
+      <div class="shop-banner" id="shop-banner"></div>
+      <button class="shop-swap" id="go-stores">换门店</button>
+      <div class="shop-body">
+        <div class="shop-name">${esc(state.store?.storeName || '—')}</div>
+        <div class="shop-addr">${esc(state.store?.addr || '')}</div>
+        <div class="shop-tags" id="shop-tags"></div>
       </div>
       <div id="store-head"></div>
     </div>
+
     <div id="live-host"></div>
+
     <div class="group">
-      <div class="group-hd"><b>预约时段</b><span id="biz-hint"></span></div>
-      <div class="picks" id="quick"></div>
+      <div class="group-hd"><b>选时段</b><span id="biz-hint"></span></div>
+      <div class="picks" id="days"></div>
       <div class="inputs">
         <div class="inp"><label>日期</label><input type="date" id="d" value="${esc(state.date)}" min="${todayStr()}"></div>
         <div class="inp"><label>开始</label><input type="time" id="s" step="300" value="${esc(state.start)}"></div>
         <div class="inp"><label>结束</label><input type="time" id="e" step="300" value="${esc(state.end)}"></div>
       </div>
+      <div class="durline" id="durline"></div>
       <div class="tip" id="time-hint" style="padding-top:0"></div>
     </div>
-    <div id="seat-host">${state.rooms.length ? '' : '<div class="page-loading"><span class="spinner"></span> 正在获取座位图…</div>'}</div>
-    <div class="legend">
-      <span><i style="background:var(--seat-free)"></i>可预约</span>
-      <span><i style="background:var(--seat-taken)"></i>已占用</span>
-      <span><i style="background:var(--seat-mine)"></i>我的</span>
-      <span><i style="background:var(--seat-sel)"></i>已选</span>
+
+    <div class="group seatgroup">
+      <div class="group-hd"><b>选座位</b><span id="seat-count"></span></div>
+      <div class="picks" id="quick"></div>
+      <div id="seat-host">${state.rooms.length ? '' : '<div class="page-loading"><span class="spinner"></span> 正在获取座位图…</div>'}</div>
+      <div class="legend">
+        <span><i style="background:var(--seat-free)"></i>可预约</span>
+        <span><i style="background:var(--seat-taken)"></i>已占用</span>
+        <span><i style="background:var(--seat-mine)"></i>我的</span>
+        <span><i style="background:var(--seat-sel)"></i>已选</span>
+      </div>
+      <div class="anchorbar">
+        <span class="subtle">座位坐标</span>
+        <button class="chip" data-anchor="tl">左上角（官方）</button>
+        <button class="chip" data-anchor="c">中心点</button>
+      </div>
     </div>
-    <div class="anchorbar">
-      <span class="subtle">座位坐标</span>
-      <button class="chip" data-anchor="tl">左上角（官方）</button>
-      <button class="chip" data-anchor="c">中心点</button>
-      <span class="subtle">方块整体偏移就切一下</span>
+
+    <div class="group">
+      <div class="cell tap" id="agenda-toggle">
+        <div class="c-main">
+          <div class="c-title">已被预约的时段</div>
+          <div class="c-desc" id="agenda-sum">点开看这个店哪些时段被占</div>
+        </div>
+        <span class="chev" id="agenda-chev"></span>
+      </div>
+      <div id="agenda-panel" style="display:none"><div id="agenda-host"></div></div>
     </div>
-    <div id="agenda-host"></div>
   </div>
   <div class="stickybar" id="sticky">
     <div class="sb-info">
@@ -816,7 +884,7 @@ function applyOrder(r) {
 PAGES.order = () => {
   const o = state.orderDetail;
   if (!o) return '<div class="empty">订单不存在</div>';
-  const si = o.statusInfo || { label: '状态 ' + o.orderStatus, tone: 'mute', conf: 'unknown' };
+  const si = o.statusInfo || { label: statusText(o.orderStatus), tone: statusTone(o.orderStatus), conf: 'unknown' };
   const st = ['ok', 'warn', 'bad', 'mute', 'blue'].includes(si.tone) ? si.tone : 'mute';
   const code = Number(o.orderStatus);
   const live = [3, 6].includes(code);        // 已支付 / 使用中 才能碰硬件
@@ -1155,6 +1223,10 @@ async function openStore(storeId, opts = {}) {
     if (!Object.keys(state.prices).length) state.prices = Object.fromEntries(seats.prices.map(p => [p.spaceId, p.price]));
     state.storeMeta = seats.store;
     paintSeats(el);
+    // 座位图是 await 回来的，AFTER.book 早就跑完了 —— 这几处必须在这里补刷
+    paintSeatCount(el);
+    paintAgendaSum(el);
+    paintDurline(el);
   } else {
     el.querySelector('#seat-host').innerHTML = `<div class="notice red">座位图获取失败：${esc(seats.msg || '')}</div>`;
   }
@@ -1181,19 +1253,86 @@ function resetTimes() {
 
 function paintStoreHead(el) {
   const s = state.storeInfo; if (!s) return;
+  // 横幅用门店照片；没有照片就把横幅收掉，不留一块灰
+  const ph = (s.photos && s.photos[0]) || '';
+  const bn = el.querySelector('#shop-banner');
+  if (bn) { if (ph) bn.style.backgroundImage = `url("${ph}")`; else bn.style.display = 'none'; }
+  const dist = (s.distance != null && isFinite(s.distance)) ? `<span class="pill">离你 ${(Number(s.distance) / 1000).toFixed(1)} km</span>` : '';
+  const tg = el.querySelector('#shop-tags');
+  if (tg) tg.innerHTML = [
+    `<span class="pill ${s.isOpen ? 'ok' : 'bad'}">${s.isOpen ? '营业中' : '已打烊'}</span>`,
+    `<span class="pill blue">${esc(hhmm(s.bizStart) || '—')}–${esc(hhmm(s.bizEnd) || '—')}</span>`,
+    `<span class="pill">座位 ${esc(String(s.seatUsed ?? '—'))}/${esc(String(s.seatAll ?? '—'))}</span>`,
+    dist,
+  ].filter(Boolean).join('');
   el.querySelector('#store-head').innerHTML = `
-    <div class="cell"><div class="c-main"><div class="c-title">营业</div></div>
-      <div class="c-extra"><span class="pill ${s.isOpen ? 'ok' : 'bad'}">${s.isOpen ? '营业中' : '已打烊'}</span> ${esc(hhmm(s.bizStart))}–${esc(hhmm(s.bizEnd))}</div></div>
-    <div class="cell"><div class="c-main"><div class="c-title">座位</div></div>
-      <div class="c-extra">已用 ${esc(String(s.seatUsed ?? '—'))} / 共 ${esc(String(s.seatAll ?? '—'))}</div></div>
-    <div class="cell tap" id="go-store"><div class="c-main"><div class="c-title" style="font-size:15px;color:var(--link)">门店详情 / 规则</div>
+    <div class="cell tap" id="go-store"><div class="c-main">
+      <div class="c-title" style="font-size:15px;color:var(--link)">门店详情 / 规则</div>
       <div class="c-desc">单价、预约规则、取消规则、门店照片</div></div><span class="chev"></span></div>`;
   el.querySelector('#go-store').onclick = () => push('store');
   el.querySelector('#biz-hint').textContent = s.isOpen ? '营业中' : '已打烊';
+  paintDays(el);
   paintQuickPicks(el);
+  paintDurline(el);
   const demand = s.demandMinutes ?? 60, max = s.maxMinutes ?? 720;
   el.querySelector('#time-hint').innerHTML =
     `最短 <b>${Math.round(demand / 60 * 10) / 10} 小时</b> · 最长 <b>${Math.round(max / 60)} 小时</b> · 可提前 <b>${s.demandDay ?? 5} 天</b>预约`;
+}
+
+/* 今天 / 明天 / 后天 快捷日期 */
+function paintDays(el) {
+  const box = el.querySelector('#days'); if (!box) return;
+  const WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const mk = (n, label) => {
+    const d = new Date(); d.setDate(d.getDate() + n);
+    const v = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { v, label, wd: WD[d.getDay()] };
+  };
+  const list = [mk(0, '今天'), mk(1, '明天'), mk(2, '后天')];
+  box.innerHTML = list.map(d =>
+    `<div class="pick ${d.v === state.date ? 'on' : ''}" data-d="${d.v}">${d.label}<span class="subtle" style="margin-left:4px">${d.wd}</span></div>`
+  ).join('');
+  box.querySelectorAll('.pick').forEach(b => b.onclick = () => {
+    state.date = b.dataset.d;
+    const di = el.querySelector('#d'); if (di) di.value = state.date;
+    box.querySelectorAll('.pick').forEach(q => q.classList.toggle('on', q === b));
+    reloadSeats();
+  });
+}
+
+/* 时长 / 计费 / 原价 → 月卡抵扣后 ¥0 */
+function paintDurline(el) {
+  const box = el.querySelector('#durline'); if (!box) return;
+  const m = durationMin();
+  if (!m) { box.innerHTML = '<span class="subtle">先选开始和结束时间</span>'; return; }
+  const billed = billableMin(m, 30);
+  const hours = Math.round(billed / 60 * 10) / 10;
+  let est = estimate();
+  let guessed = false;
+  if (est == null) {   // 还没选座：拿门店最低单价先估一个，别显示「—」
+    const ps = Object.values(state.prices || {}).filter(x => x != null && isFinite(x));
+    if (ps.length) { est = Math.min(...ps) / 100 * (billed / 60); guessed = true; }
+  }
+  box.innerHTML = `时长 <b>${m} 分钟</b>（计费 ${hours} 小时）· 原价 ` +
+    (est == null ? '<b>—</b>' : `<span class="money">¥${est.toFixed(2)}</span>`) +
+    (guessed ? '<span class="subtle">（按最低单价估）</span>' : '') +
+    ` → <span class="free">月卡抵扣后 ¥0.00</span>`;
+}
+
+/* 「已被预约的时段」那行的摘要 */
+function paintAgendaSum(el) {
+  const sum = el.querySelector('#agenda-sum'); if (!sum) return;
+  let all = 0, taken = 0;
+  for (const r of state.rooms || []) for (const x of r.seats || []) { all++; if (x.taken) taken++; }
+  sum.textContent = all ? `已被占 ${taken} / 共 ${all} 个座 · 点开看具体时段` : '点开看这个店哪些时段被占';
+}
+
+/* 座位卡头的「空 N / 共 M」 */
+function paintSeatCount(el) {
+  const box = el.querySelector('#seat-count'); if (!box) return;
+  let all = 0, taken = 0;
+  for (const r of state.rooms || []) for (const x of r.seats || []) { all++; if (x.taken) taken++; }
+  box.textContent = all ? `空 ${all - taken} / 共 ${all}` : '';
 }
 
 function paintQuickPicks(el) {
@@ -1389,9 +1528,12 @@ AFTER.book = (el) => {
   const onChange = () => {
     if (d.value) state.date = d.value;
     state.start = s.value; state.end = e.value;
+    paintDays(el);        // 手改了日期也要把「今天/明天/后天」的高亮同步过来
     reloadSeats();
   };
   [d, s, e].forEach(i => i.onchange = onChange);
+  // 日期/时间改了都要刷新「时长 · 价」
+  [d, s, e].forEach(i => i.addEventListener('input', () => paintDurline(el)));
   const setAnchor = (a) => {
     state.seatAnchor = a;
     try { localStorage.setItem('wzz.anchor', a); } catch { }
@@ -1402,9 +1544,18 @@ AFTER.book = (el) => {
   setAnchor(state.seatAnchor === 'c' ? 'c' : 'tl');
   if (state.storeInfo) paintStoreHead(el);
   if (state.rooms.length) paintSeats(el);
-  paintQuickPicks(el);
+  paintSeatCount(el);
   paintLive(el);
   paintAgenda(el);
+
+  // 「已被预约的时段」折叠：默认收起（一屏十几行太吵），点开才渲染
+  const at = el.querySelector('#agenda-toggle'), ap = el.querySelector('#agenda-panel'), ac = el.querySelector('#agenda-chev');
+  paintAgendaSum(el);
+  if (at && ap) at.onclick = () => {
+    const open = ap.style.display === 'none';
+    ap.style.display = open ? 'block' : 'none';
+    if (ac) ac.classList.toggle('down', open);
+  };
 };
 
 /* —— 当前状况卡：门店此刻到底什么状态 + 我的订单能不能开门/开灯 —— */
@@ -1617,6 +1768,10 @@ async function reloadSeats() {
   state.rooms = r.rooms; state.myUserId = r.myUserId; state.storeMeta = r.store;
   if (r.prices && r.prices.length) state.prices = Object.fromEntries(r.prices.map(p => [p.spaceId, p.price]));
   paintSeats(el);
+  // 座位图是异步回来的，这三处必须在这里补刷（AFTER.book 那一刻 state.rooms 还是空的）
+  paintSeatCount(el);
+  paintAgendaSum(el);
+  paintDurline(el);
 }
 
 /* —— 下单确认（半屏抽屉）—— */
@@ -1760,7 +1915,7 @@ function paintHistory(el) {
     <div class="group-hd"><b>本机记录</b><span>已结束 / 已退座的单，点开可回查</span></div>
     ${hist.map((h, i) => `<div class="ocard hist" data-h="${i}">
       <div class="ohd"><div class="oshop">${esc(h.storeName || '未知门店')}</div>
-        <span class="pill ${Number(h.orderStatus) === 8 ? 'mute' : 'blue'}">${Number(h.orderStatus) === 8 ? '已结束' : '状态 ' + esc(String(h.orderStatus))}</span></div>
+        <span class="pill ${statusTone(h.orderStatus, h.statusInfo)}">${esc(statusText(h.orderStatus, h.statusInfo))}</span></div>
       <div class="obody"><b>${esc(h.spaceName || '')} ${esc(h.seatName || '')} 号</b> · ${esc(String(h.date || h.day || '').slice(0, 10))} ${esc(hhmm(h.begin))}–${esc(hhmm(h.end))}</div>
       <div class="ofoot"><span class="subtle mono">${esc(String(h.orderId))}</span><span class="chev"></span></div>
     </div>`).join('')}
@@ -1800,13 +1955,13 @@ function orderCardHtml(o, i, kind) {
   const when = `${esc((kind === 'hist' ? o.day : o.date) || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}`;
   return `<div class="ocard" data-i="${i}" data-kind="${kind}">
     <div class="ohd"><div class="oshop">${esc(o.storeName || '未知门店')}</div>
-      <span class="pill ${tone}">${esc(si.label || '状态 ' + o.orderStatus)}</span></div>
+      <span class="pill ${tone}">${esc(statusText(o.orderStatus, si))}</span></div>
     <div class="obody">
       <b>${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</b> · ${when}<br>
       <span class="subtle mono">${esc(o.orderId)}</span>
     </div>
     <div class="ofoot">
-      <span>orderStatus = ${esc(String(o.orderStatus))}${o.cardTypeName ? ' · ' + esc(o.cardTypeName) : ''}${o.lightOpenStatus != null ? ' · 灯' + (o.lightOpenStatus === 1 ? '已开' : '未开') : ''}</span>
+      <span>${esc(statusText(o.orderStatus, si))}${o.cardTypeName ? ' · ' + esc(o.cardTypeName) : ''}${o.lightOpenStatus != null ? ' · 灯' + (o.lightOpenStatus === 1 ? '已开' : '未开') : ''}</span>
       <span>${[3, 6].includes(Number(o.orderStatus)) ? '<b style="color:var(--brand)">可开门</b> · ' : ''}详情 <span class="chev" style="display:inline-block"></span></span>
     </div>
   </div>`;
