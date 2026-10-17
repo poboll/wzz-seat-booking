@@ -1,0 +1,6 @@
+{
+  "token": "eyJhbGciOiJIUzUxMiJ9.<把你的 JWT 贴这里>.<签名>",
+  "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.78(0x18004e33) NetType/WIFI Language/zh_CN",
+  "savedAt": null,
+  "source": "auth.example.json"
+}
