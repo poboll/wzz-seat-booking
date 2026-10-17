@@ -1,0 +1,1207 @@
+#!/usr/bin/env node
+/**
+ * 王知之自习室 · 本地选座下单助手（仅自用）
+ * ============================================================
+ *  运行：node book.mjs   然后浏览器打开 http://127.0.0.1:8790
+ *
+ *  设计目标
+ *  --------
+ *  1) 只订「月卡 0 元覆盖」的门店（清单实时取自 /card/available-stores，服务端强制校验）
+ *  2) 走完 0 元全流程：选店 → 选时段 → 选座 → 生成订单 → 月卡抵扣（实付 ¥0）
+ *  3) 支付（非 0 元时）/ 开门 一律回原 App —— 硬件层做不到，见 README
+ *  4) 轻量：零依赖，只有 http/fs/path/os 标准库；前端单文件 ui.html
+ *  5) token 与 UA 分离到 auth.json，改完即生效（不用重启），支持从 HAR 一键提取
+ *
+ *  ★ 0 元是怎么实现的（HAR 逐字段实证，2026-10-16 那单）
+ *  ---------------------------------------------------
+ *    confirmSeat 只生成「待支付」订单（orderStatus=1），wechat-order-amt 报原价
+ *    （四川绵阳万达店 700分/h × 4.5h = 3150 分）。真正让月卡抵扣、把单子变成
+ *    「已支付」的是：
+ *      POST /seat/order/changeTheTime
+ *        { orderId, userCardId:<月卡>, cardId:null, cardTypeCode:'DAY',
+ *          ruleId:null, extendOrderId:'', type:1, izWeChatPay:false }
+ *      → 返回 data.code:326「订单支付成功」，orderStatus 1 → 3，
+ *        cardTypeName=时长卡，paymentMethod=9，实付 0 元（扣月卡 1 天）。
+ *    接口名写着「改时长」，但 HAR 里它就是「选卡结算」那一步，别被名字骗了。
+ *
+ *  三件套请求头（所有接口都要，token 与 UA 绑死，差一位就返回 12002）：
+ *    Authorization: Bearer <JWT>
+ *    User-Agent: 登录那串 MicroMessenger/8.0.78(...)
+ *    Referer: https://servicewechat.com/<appId>/205/page-frame.html
+ */
+
+import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ======================= CONFIG =======================
+const CONFIG = {
+  port: 8790,
+  host: '127.0.0.1',            // 只监听本机，不要改成 0.0.0.0
+  appId: 'wxa5cf43f677b9a059',
+  base: 'https://wxa.wangzhizhi.mored.tech/opsli-boot/api/v1/applet',
+
+  zeroCardId: '20261015110218471-000346pvpGZKAx',   // 月卡 userCardId（0 元覆盖）
+  zeroCardTypeCode: 'DAY',                          // 月卡的 cardTypeCode，抵扣时必填
+  allowCardSettle: true,                            // 允许月卡抵扣（会扣 1 天，不可撤销）
+
+  zeroStoresTtlMs: 10 * 60 * 1000,   // 0 元门店清单缓存 10 分钟
+  homeLon: 87.6, homeLat: 43.8,      // confirmSeat 的 remarks（下单不校验位置）
+};
+
+// 兜底 token（首次运行 auth.json 不存在时用；之后一律以 auth.json 为准）
+const DEFAULT_AUTH = {
+  token: 'REDACTED-CREDENTIAL',
+  ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.78(0x18004e33) NetType/WIFI Language/zh_CN',
+  savedAt: '2026-10-16T19:04:40+08:00',
+  source: '初始内置（来自 Stream-2026-10-16 19:04:40.har）',
+};
+
+const AUTH_FILE = path.join(__dirname, 'auth.json');
+const HAR_SCAN_DIRS = [path.join(os.homedir(), 'Downloads'), path.join(__dirname, '..')];
+
+// ======================= auth.json（热加载） =======================
+let auth = null, authMtime = 0, authCheckedAt = 0;
+
+function loadAuth(force = false) {
+  const now = Date.now();
+  if (!force && auth && now - authCheckedAt < 2000) return auth;
+  authCheckedAt = now;
+  try {
+    const st = fs.statSync(AUTH_FILE);
+    if (!force && auth && st.mtimeMs === authMtime) return auth;
+    const j = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+    if (j && typeof j.token === 'string' && j.token.length > 40) {
+      auth = { token: j.token.trim(), ua: (j.ua || DEFAULT_AUTH.ua).trim(), savedAt: j.savedAt || null, source: j.source || 'auth.json' };
+      authMtime = st.mtimeMs;
+      return auth;
+    }
+  } catch { /* 不存在或坏文件 → 用兜底 */ }
+  if (!auth) { auth = { ...DEFAULT_AUTH }; authMtime = 0; }
+  return auth;
+}
+
+function saveAuth(next) {
+  const payload = { token: next.token, ua: next.ua, savedAt: new Date().toISOString(), source: next.source || '手动更新' };
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+  auth = { ...payload };
+  authMtime = fs.statSync(AUTH_FILE).mtimeMs;
+  return auth;
+}
+
+// ======================= 上游 API 代理 =======================
+// GET 自动重试（12002/5xx/网络抖动实测瞬时出现，重试即恢复）；
+// POST 绝不重试 —— confirmSeat 超时重试会重复下单，changeTheTime 重试会重复扣天数。
+async function apiOnce(p, params, method, body, timeoutMs, authOverride, form) {
+  const a = authOverride || loadAuth();
+  const url = new URL(CONFIG.base + p);
+  url.searchParams.set('appId', CONFIG.appId);
+  if (params) for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'Authorization': 'Bearer ' + a.token,
+        'User-Agent': a.ua,
+        'Referer': `https://servicewechat.com/${CONFIG.appId}/205/page-frame.html`,
+        // 上游分两种入参风格（实测）：judgment_condition / openLight / chooseSeatNow 收 JSON；
+        // finishStudy / changeSeat / immediatelySeat 只认 form-urlencoded（传 JSON 会报「订单号不能为空」，传 form 给 openLight 会 HTTP 415）。
+        'Content-Type': form ? 'application/x-www-form-urlencoded' : 'application/json',
+      },
+      body: form ? new URLSearchParams(form).toString() : (body ? JSON.stringify(body) : undefined),
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    let j;
+    try { j = JSON.parse(text); }
+    catch { return { success: false, code: null, msg: `非 JSON 响应（HTTP ${res.status}）`, raw: text.slice(0, 300), retryable: res.status >= 500 }; }
+    const retryable = j?.code === 12002 || (j?.httpStatus ?? 0) >= 500;
+    return { ...j, retryable };
+  } catch (e) {
+    return { success: false, code: null, msg: '请求失败：' + (e.name === 'AbortError' ? '超时' : e.message), retryable: true };
+  } finally { clearTimeout(timer); }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function api(p, params = null, method = 'GET', body = null, timeoutMs = 20000, retries = 2, authOverride = null) {
+  const max = method === 'GET' ? retries : 0;
+  for (let attempt = 0; ; attempt++) {
+    const r = await apiOnce(p, params, method, body, timeoutMs, authOverride);
+    if (!r.retryable || attempt >= max) return r;
+    await sleep(1000 * (attempt + 1));
+  }
+}
+
+// POST 一律不重试（见上），form-urlencoded 变体也一样。
+async function apiForm(p, form, timeoutMs = 20000) {
+  return apiOnce(p, null, 'POST', null, timeoutMs, null, form);
+}
+
+// ======================= 订单状态码 =======================
+// ⚠ 平台没有公开枚举。下表里 confirmed 的是 HAR / 实测直接观察到的，inferred 的由前端标注提示。
+//   已实证：1 = 待支付（wechat-order-amt 报原价、queryUserUsedCard 返回 308）
+//          3 = 已支付（changeTheTime 返回 326 后回读所得，paymentMethod=9、cardTypeName=时长卡）
+//          6 = 使用中（同一单在 19:20–23:47 时段内回读为 6；此状态下 finishStudy 可执行）
+//          8 = 已结束（实测 finishStudy 之后 6 → 8，且 studyEndTime 被截断为退座那一刻）
+//   注意：早先版本把 6 标成「已结束」是错的 —— 那是「进行中」，8 才是结束。
+const ORDER_STATUS = {
+  1: { label: '待支付', tone: 'warn', conf: 'confirmed', hint: '还没结算。用月卡抵扣后才会变「已支付」。' },
+  3: { label: '已支付（待使用）', tone: 'ok', conf: 'confirmed', hint: '钱/卡已结清。到时段前后可以开门、开灯。' },
+  6: { label: '使用中', tone: 'blue', conf: 'confirmed', hint: '当前正处于预约时段内，座位已锁定。此状态下能开门 / 开灯 / 退座。' },
+  8: { label: '已结束', tone: 'mute', conf: 'confirmed', hint: '已退座或时段已过。座位已释放，无法再开门。' },
+};
+
+function statusInfo(code) {
+  const c = Number(code);
+  if (ORDER_STATUS[c]) return { code: c, ...ORDER_STATUS[c] };
+  return { code: c, label: `状态 ${Number.isFinite(c) ? c : '?'}`, tone: 'mute', conf: 'unknown', hint: '该状态码尚未确认，请以原 App 显示为准' };
+}
+
+// ======================= 0 元门店清单 =======================
+let zeroCache = null;
+
+function cityOf(areaName = '') {
+  const a = (areaName || '').trim();
+  for (const m of ['北京市', '天津市', '上海市', '重庆市']) if (a.startsWith(m)) return m;
+  const prov = a.match(/^([^省]{2,10}?(?:省|自治区))/);
+  const city = a.match(/(?:省|自治区)([^省]{2,15}?(?:市|自治州|地区|盟))/);
+  if (city) return city[1];
+  const m2 = a.match(/^([^\s市]{2,12}市)/);
+  if (m2) return m2[1];
+  if (prov) {
+    const m3 = a.slice(prov[1].length).match(/^([^\s]{2,15}?(?:市|自治州|地区|盟))/);
+    if (m3) return m3[1];
+  }
+  return '未知';
+}
+
+function normalizeStore(row) {
+  const addr = row.storeAreaName || '';
+  return {
+    storeId: String(row.storeId ?? row.id),
+    storeName: row.storeName,
+    city: cityOf(addr),
+    addr,
+    bizTime: row.storeBusinessTime || '',
+  };
+}
+
+function loadSeedStores() {
+  try {
+    const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'zero_stores_seed.json'), 'utf8'));
+    return { map: new Map(seed.stores.map(r => [String(r.storeId), normalizeStore(r)])), total: seed.stores.length };
+  } catch { return { map: new Map(), total: 0 }; }
+}
+
+// 分页拉全（免得某张卡覆盖超过单页上限时漏店）
+async function fetchAllZeroStores() {
+  const pageSize = 200;
+  const all = [];
+  for (let pageNo = 1; pageNo <= 20; pageNo++) {
+    const r = await api('/card/available-stores', { userCardId: CONFIG.zeroCardId, cityId: '', pageNo, pageSize });
+    const rows = r?.data?.rows || [];
+    all.push(...rows);
+    const total = Number(r?.data?.total ?? 0);
+    const pageCount = Number(r?.data?.pageCount ?? 1);
+    if (!rows.length || all.length >= total || pageNo >= pageCount) break;
+  }
+  return all;
+}
+
+async function getZeroStores(force = false) {
+  if (zeroCache && !force && Date.now() - zeroCache.ts < CONFIG.zeroStoresTtlMs) return zeroCache;
+  try {
+    const rows = await fetchAllZeroStores();
+    if (rows.length) {
+      const map = new Map(rows.map(row => [String(row.storeId ?? row.id), normalizeStore(row)]));
+      zeroCache = { ts: Date.now(), map, total: map.size, stale: false };
+      return zeroCache;
+    }
+    throw new Error('接口返回空清单');
+  } catch (e) {
+    const seed = loadSeedStores();
+    zeroCache = { ts: Date.now(), map: seed.map, total: seed.total, stale: true, failMsg: e.message };
+    return zeroCache;
+  }
+}
+
+async function isZeroStore(storeId) {
+  const z = await getZeroStores();
+  const hit = z.map.get(String(storeId));
+  if (hit) return { ok: true, store: hit, total: z.total };
+  // 缓存可能过期（刚买卡/换卡）→ 强刷一次再判
+  const fresh = await getZeroStores(true);
+  const hit2 = fresh.map.get(String(storeId));
+  return { ok: !!hit2, store: hit2 || null, total: fresh.total };
+}
+
+// ======================= 小工具 =======================
+function decodeToken(token = loadAuth().token) {
+  try {
+    const p = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    return { exp: p.exp, iat: p.iat, userId: p.userid, openid: p.openid, appid: p.appid };
+  } catch { return null; }
+}
+
+function send(res, obj, code = 200) {
+  const s = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(s) });
+  res.end(s);
+}
+
+function readBody(req, limit = 12e6) {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    req.on('data', c => { buf += c; if (buf.length > limit) req.destroy(); });
+    req.on('end', () => { try { resolve(buf ? JSON.parse(buf) : {}); } catch (e) { reject(new Error('请求体不是合法 JSON')); } });
+    req.on('error', reject);
+  });
+}
+
+const minToHHMM = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const toMin = t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + (m || 0); };
+
+// 计费：向上取整到 continueTimeUnit（HAR 实证 267min → 4.5h，unit=30）
+function billableMinutes(minutes, unit = 30) { return Math.ceil(minutes / unit) * unit; }
+
+// ======================= 路由 =======================
+const routes = [];
+const get = (p, h) => routes.push({ method: 'GET', pattern: p, handler: h });
+const post = (p, h) => routes.push({ method: 'POST', pattern: p, handler: h });
+
+// ---------- 状态总览 ----------
+get('/api/status', async (q, _b, r) => {
+  const a = loadAuth(true);
+  const t = decodeToken(a.token);
+  let alive = null, probeMsg = null;
+  try {
+    const probe = await api('/fp/store/org/store-count', null, 'GET', null, 12000, 1);
+    alive = probe?.success === true || probe?.code === 200;
+    if (probe?.code === 12002) probeMsg = '服务端返回 Token失效(12002)';
+    else if (!alive) probeMsg = probe?.msg || probe?.code || '探活失败';
+  } catch (e) { probeMsg = e.message; }
+
+  let zeroCount = null, zeroStale = null, storesAt = null, cities = 0, failMsg = null;
+  try {
+    const z = await getZeroStores();
+    zeroCount = z.total; zeroStale = !!z.stale; storesAt = z.ts; failMsg = z.failMsg || null;
+    cities = new Set([...z.map.values()].map(s => s.city)).size;
+  } catch { }
+
+  send(r, {
+    ok: true,
+    token: t ? {
+      exp: t.exp, iat: t.iat,
+      expStr: new Date(t.exp * 1000).toLocaleString('zh-CN', { hour12: false }),
+      iatStr: t.iat ? new Date(t.iat * 1000).toLocaleString('zh-CN', { hour12: false }) : null,
+      daysLeft: Math.floor((t.exp * 1000 - Date.now()) / 86400000),
+      myUserId: t.userId,
+    } : null,
+    tokenAlive: alive, probeMsg,
+    tokenSource: a.source, tokenSavedAt: a.savedAt,
+    zeroCount, zeroStale, storesAt, failMsg, cities,
+    cardId: CONFIG.zeroCardId,
+    allowCardSettle: CONFIG.allowCardSettle,
+    orderStatusMap: ORDER_STATUS,
+  });
+});
+
+// ---------- 0 元门店列表 ----------
+get('/api/stores', async (q, _b, r) => {
+  const z = await getZeroStores(q.force === '1');
+  const stores = [...z.map.values()].sort((a, b) => a.city.localeCompare(b.city, 'zh') || a.storeName.localeCompare(b.storeName, 'zh'));
+  const byCity = {};
+  for (const s of stores) (byCity[s.city] ||= []).push(s.storeId);
+  send(r, {
+    ok: true, total: z.total, updatedAt: z.ts, stale: !!z.stale, failMsg: z.failMsg || null,
+    cityCount: Object.keys(byCity).length, byCity, stores,
+  });
+});
+
+// ---------- 门店详情（含营业状态 / 座位数 / 取消规则 / 空间单价）----------
+get('/api/store', async (q, _b, r) => {
+  const storeId = q.storeId;
+  if (!storeId) return send(r, { ok: false, msg: '缺少 storeId' }, 400);
+  const date = q.date || new Date().toLocaleDateString('sv-SE');
+  const [det, open, prices, rule] = await Promise.all([
+    api('/sp/store/org/getStoreDetail', { id: storeId, storeLat: CONFIG.homeLat, storeLon: CONFIG.homeLon, date }),
+    api('/store/live_situation/iz_open', { storeId }),
+    api('/store-space-booking-prices/list', { storeId, seatType: 'SEAT' }),
+    api(`/seat/order/${encodeURIComponent(storeId)}/queryCancelRule`),
+  ]);
+  const d = det?.data || {};
+  if (!d.id && !d.storeName) return send(r, { ok: false, msg: det?.msg || '门店详情获取失败' }, 502);
+  const priceList = prices?.data?.[0]?.spacePriceList || [];
+  send(r, {
+    ok: true,
+    store: {
+      storeId: String(storeId), name: d.storeName, area: d.storeAreaName,
+      addr: d.storeAreaAll || d.detailAddress || d.storeAreaName,
+      lon: d.storeLon, lat: d.storeLat, distance: d.storeDistance,
+      photos: d.storePhotoAll || [], pledge: d.civilizedPledge || [],
+      bizStart: d.businessStartTime, bizEnd: d.businessEndTime,
+      seatAll: d.storeSeatAll, seatUsed: d.storeSeatUsed,
+      demandMinutes: d.storeDemandTime ?? 60,        // 最短时长
+      maxMinutes: d.orderLongestReservationTime ?? 720, // 最长时长
+      advanceReservation: d.storeAdvanceReservation ?? 30,
+      demandDay: d.storeDemandDay ?? 5,              // 可提前几天
+      stepMinutes: d.stepMinutes ?? d.seatSelectionInterval ?? 30,
+      distanceStipulation: d.storeDistanceStipulation ?? 1000,
+      isOpen: open?.data === true,
+    },
+    prices: priceList.map(p => ({ spaceId: String(p.spaceId), price: p.price, yuanPerHour: p.price / 100 })),
+    cancelRule: rule?.data || null,
+  });
+});
+
+// ---------- 座位图 ----------
+get('/api/seats', async (q, _b, r) => {
+  const { storeId, date, start, end } = q;
+  if (!storeId || !date || !start || !end) return send(r, { ok: false, msg: '缺少 storeId/date/start/end' }, 400);
+  const startTime = `${date} ${start}:00`, endTime = `${date} ${end}:00`;
+  const [live, det, prices] = await Promise.all([
+    api('/store/live_situation/query', { storeId, startTime, endTime, chooseWay: 2 }),
+    api('/sp/store/org/getStoreDetail', { id: storeId, storeLat: CONFIG.homeLat, storeLon: CONFIG.homeLon, date }),
+    api('/store-space-booking-prices/list', { storeId, seatType: 'SEAT' }),
+  ]);
+  if (live?.success === false) return send(r, { ok: false, msg: live.msg || '座位图获取失败' }, 502);
+  const t = decodeToken();
+  const rooms = (live?.data || []).map(room => ({
+    roomId: room.roomId, roomName: room.roomName,
+    img: room.bgImgUrl,
+    imgW: Number(room.bgImgWidth) || 100,   // x 坐标基准
+    imgH: Number(room.bgImgLength) || 100,  // y 坐标基准
+    seats: (room.seatSelectionConfigs || []).map(s => ({
+      seatId: String(s.seatId), spaceId: String(s.spaceId),
+      spaceName: s.spaceName, seatName: String(s.seatName),
+      x: Number(s.coordinateX) || 0, y: Number(s.coordinateY) || 0,
+      w: Number(s.imageWidth) || 50, h: Number(s.imageLength) || 50,
+      taken: s.userId != null, occupantUserId: s.userId ? String(s.userId) : null,
+      photo: s.userPhoto || null,
+      mine: !!(t?.userId && s.userId && String(s.userId) === String(t.userId)),
+      bookable: s.openBookingStatus === 1,
+    })),
+  }));
+  const d = det?.data || {};
+  const priceList = prices?.data?.[0]?.spacePriceList || [];
+  send(r, {
+    ok: true, rooms,
+    prices: priceList.map(p => ({ spaceId: String(p.spaceId), price: p.price, yuanPerHour: p.price / 100 })),
+    store: {
+      storeId, name: d.storeName, area: d.storeAreaName,
+      bizStart: d.businessStartTime, bizEnd: d.businessEndTime,
+      seatAll: d.storeSeatAll, seatUsed: d.storeSeatUsed,
+      lon: d.storeLon, lat: d.storeLat,
+      stepMinutes: d.stepMinutes ?? d.seatSelectionInterval ?? 30,
+      demandMinutes: d.storeDemandTime ?? 60,
+      maxMinutes: d.orderLongestReservationTime ?? 720,
+    },
+    myUserId: t?.userId || null,
+  });
+});
+
+// ---------- 单座位空闲校验 ----------
+get('/api/spare', async (q, _b, r) => {
+  const { storeId, spaceId, seatId, date, start, end } = q;
+  if (!storeId || !spaceId || !seatId || !date || !start || !end) return send(r, { ok: false, msg: '参数不完整' }, 400);
+  const res = await api('/seat/querySeatSpareTime', {
+    storeId, spaceId, seatId,
+    studyBeginTime: `${date} ${start}:00`, studyEndTime: `${date} ${end}:00`,
+  });
+  const busy = Array.isArray(res?.data) ? res.data : [];
+  send(r, { ok: true, busyCount: busy.length, busy });
+});
+
+// ---------- 下单 ----------
+post('/api/book', async (q, body, r) => {
+  const { storeId, spaceId, seatId, date, start, end } = body || {};
+  if (!storeId || !spaceId || !seatId || !date || !start || !end) {
+    return send(r, { ok: false, msg: '参数不完整（storeId/spaceId/seatId/date/start/end）' }, 400);
+  }
+  // ① 硬约束：只订月卡 0 元覆盖店
+  const zero = await isZeroStore(storeId);
+  if (!zero.ok) {
+    return send(r, { ok: false, blocked: true, msg: `已拒绝：该店不在月卡 0 元覆盖清单（${zero.total} 家）内。本工具只订 0 元店。` }, 403);
+  }
+  const st = zero.store;
+  const startTime = `${date} ${start}:00`, endTime = `${date} ${end}:00`;
+
+  // ② 本地前置校验（给出比后端更友好的提示；最终以后端 chooseSeatNow 为准）
+  const info = (await api('/sp/store/org/getStoreDetail', { id: storeId, storeLat: CONFIG.homeLat, storeLon: CONFIG.homeLon, date }))?.data || {};
+  const dur = toMin(end) - toMin(start);
+  const demand = info.storeDemandTime ?? 60, longest = info.orderLongestReservationTime ?? 720;
+  if (dur <= 0) return send(r, { ok: false, msg: '开始时间必须早于结束时间' }, 400);
+  if (dur < demand) return send(r, { ok: false, msg: `该店最短可预约 ${demand} 分钟，你选了 ${dur} 分钟` }, 400);
+  if (dur > longest) return send(r, { ok: false, msg: `该店单次最长 ${Math.floor(longest / 60)} 小时，你选了 ${(dur / 60).toFixed(1)} 小时` }, 400);
+
+  // ③ 该座位在这个时段是否真的空着（HAR 里小程序也先调了这一步）
+  const spare = await api('/seat/querySeatSpareTime', { storeId, spaceId, seatId, studyBeginTime: startTime, studyEndTime: endTime });
+  if (Array.isArray(spare?.data) && spare.data.length) {
+    return send(r, { ok: false, blocked: true, stage: 'querySeatSpareTime', msg: '该座位在这个时段已被占用，换一个座位或换个时段。' }, 409);
+  }
+
+  // ④ 前置校验（code 308 = 可继续）
+  const pre = await api('/seat/order/chooseSeatNow', null, 'POST',
+    { storeId, startTime, endTime, chooseWay: 2, timeStep: 60, storeAdvanceReservation: info.storeAdvanceReservation ?? 30, seatType: 1 });
+  const preCode = pre?.data?.code, preMsg = pre?.data?.message || pre?.msg;
+  if (preCode !== 308) {
+    return send(r, { ok: false, blocked: true, stage: 'chooseSeatNow', code: preCode, msg: `前置校验未通过（code=${preCode}）：${preMsg || '该时段可能不可预约'}` }, 409);
+  }
+
+  // ⑤ 生成订单（★ POST 不重试，超时后请去「当前预约」看有没有生成）
+  const conf = await api('/seat/order/confirmSeat', null, 'POST',
+    { storeId, spaceId, seatId, startTime, endTime, chooseWay: 2, remarks: `${CONFIG.homeLon},${CONFIG.homeLat}` });
+  const orderId = conf?.data?.data;
+  if (!orderId || typeof orderId !== 'string') {
+    return send(r, { ok: false, stage: 'confirmSeat', msg: '下单失败：' + JSON.stringify(conf?.data || conf).slice(0, 300) }, 409);
+  }
+
+  // ⑥ 报价 + 该单可用卡（此刻订单还是 orderStatus=1「待支付」，payAmt 是原价）
+  const [amt, usable] = await Promise.all([
+    api(`/seat/order/wechat-order-amt/${encodeURIComponent(orderId)}`),
+    listUsableCards(orderId),
+  ]);
+  const payFen = amt?.data?.payAmt ?? null, priceFen = amt?.data?.price ?? null;
+  const zeroCard = usable.find(c => c.userCardId === CONFIG.zeroCardId && c.usable);
+  const estFen = priceFen == null ? null : priceFen * (billableMinutes(dur, 30) / 60);
+  send(r, {
+    ok: true, orderId,
+    payAmtFen: payFen, payAmtYuan: payFen == null ? null : payFen / 100,
+    priceYuan: priceFen == null ? null : priceFen / 100,
+    estimateYuan: estFen == null ? null : estFen / 100,
+    minutes: dur,
+    isZero: payFen === 0,
+    store: st.storeName,
+    cards: usable,
+    canSettleWithCard: CONFIG.allowCardSettle && !!zeroCard,
+    settleWithCardHint: zeroCard
+      ? `用月卡抵扣 → 实付 ¥0（扣月卡 1 天，卡内剩余 ${zeroCard.remainValue ?? '?'} 天）`
+      : '该单的月卡不可用（这个区域/空间可能不在月卡范围内）',
+    warn: (payFen != null && payFen > 0 && !zeroCard)
+      ? `⚠ 订单已生成，但月卡在本单不可用，需实付 ¥${(payFen / 100).toFixed(2)}。请回原 App 支付或处理，本工具不再自动操作。`
+      : null,
+  });
+});
+
+// ============ 月卡 0 元抵扣（changeTheTime 就是「选卡结算」那一步）============
+// 订单：orderStatus=1 待支付 --选卡结算--> orderStatus=3 已支付，实付 0，扣月卡 1 天。
+// 不可逆：平台没有取消 / 退卡接口，扣掉的 1 天要不回来。必须界面二次确认后才调。
+const settling = new Set();   // 防重复提交：同一 orderId 同时只允许一次
+
+async function listUsableCards(orderId) {
+  const r = await api('/seat/order/queryUserUsedCard', { orderId });
+  const rows = r?.data?.data;
+  if (!Array.isArray(rows)) return [];
+  return rows.map(c => ({
+    userCardId: c.userCardId, cardName: c.cardName, cardTypeCode: c.cardTypeCode,
+    remainValue: c.remainValue, validityPeriod: c.validityPeriod, cardStatus: c.cardStatus,
+    unusableReason: c.cardUnavailableCopy || null,
+    usable: c.cardStatus === 1 && !c.cardUnavailableCopy,
+  }));
+}
+
+async function settleHandler(_q, body, r) {
+  const orderId = body?.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (!CONFIG.allowCardSettle) return send(r, { ok: false, msg: '已禁用卡结算（CONFIG.allowCardSettle=false）' }, 403);
+  if (settling.has(orderId)) return send(r, { ok: false, msg: '这一单正在抵扣中，请勿重复提交' }, 409);
+  settling.add(orderId);
+  try {
+    // ① 先回读订单真实状态：必须是「待支付」才继续（不信前端）
+    const before = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+    if (before.orderStatus !== 1) {
+      const si = statusInfo(before.orderStatus);
+      return send(r, { ok: false, blocked: true, orderStatus: before.orderStatus, statusInfo: si,
+        msg: `已拒绝：这一单当前是「${si.label}」（orderStatus=${before.orderStatus}），不是待支付状态，不能再抵扣。` }, 409);
+    }
+    // ② 再确认这单真的能用月卡
+    const cards = await listUsableCards(orderId);
+    const card = cards.find(c => c.userCardId === CONFIG.zeroCardId && c.usable);
+    if (!card) {
+      const mine = cards.find(c => c.userCardId === CONFIG.zeroCardId);
+      return send(r, { ok: false, blocked: true, cards,
+        msg: '已拒绝：这单的月卡不可用' + (mine?.unusableReason ? `（${mine.unusableReason}）` : '（订单可能已不是待支付状态）') }, 409);
+    }
+    // ③ 选卡结算（请求体逐字段照抄 HAR，字段名/顺序都别改）
+    const settle = await api('/seat/order/changeTheTime', null, 'POST', {
+      orderId,
+      userCardId: card.userCardId,
+      cardId: null,
+      cardTypeCode: card.cardTypeCode || CONFIG.zeroCardTypeCode,
+      ruleId: null,
+      extendOrderId: '',
+      type: 1,
+      izWeChatPay: false,
+    });
+    const sc = settle?.data?.code, smsg = settle?.data?.message || settle?.msg;
+    // ④ 回读订单，用真实状态说话（别只信 code）
+    const after = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+    const amt = (await api(`/seat/order/wechat-order-amt/${encodeURIComponent(orderId)}`))?.data || {};
+    const paid = after.orderStatus === 3;
+    send(r, {
+      ok: paid, code: sc, message: smsg,
+      orderStatus: after.orderStatus, statusInfo: statusInfo(after.orderStatus),
+      cardTypeName: after.cardTypeName, paymentMethod: after.paymentMethod,
+      payAmtFen: amt.payAmt ?? null, cardLeft: card.remainValue,
+      msg: paid
+        ? `月卡抵扣成功：实付 ¥${((amt.payAmt ?? 0) / 100).toFixed(2)}，订单已变「已支付」。开门请回原 App。`
+        : `抵扣结果未能确认成功（code=${sc} ${smsg || ''}），请打开原 App 核对这一单。`,
+    });
+  } finally { settling.delete(orderId); }
+}
+post('/api/settle', settleHandler);
+post('/api/use-card', settleHandler);   // 旧路径保留
+
+// ============ 当前状况（一眼看到「现在到底怎么回事」）============
+// 拼三件事：门店此刻的实时座位占用 + 灯光/门锁能操作的活跃订单 + 服务端时间。
+get('/api/live', async (q, _b, r) => {
+  const storeId = q.storeId;
+  if (!storeId) return send(r, { ok: false, msg: '缺少 storeId' }, 400);
+  const date = q.date || new Date().toLocaleDateString('sv-SE');
+  const start = q.start || '00:00', end = q.end || '23:59';
+  const [open, live, det] = await Promise.all([
+    api('/store/live_situation/iz_open', { storeId }),
+    api('/store/live_situation/query', { storeId, startTime: `${date} ${start}:00`, endTime: `${date} ${end}:00`, chooseWay: 2 }),
+    api('/sp/store/org/getStoreDetail', { id: storeId, storeLat: CONFIG.homeLat, storeLon: CONFIG.homeLon, date }),
+  ]);
+  const d = det?.data || {};
+  const t = decodeToken();
+  const rooms = (live?.data || []).map(room => {
+    const seats = room.seatSelectionConfigs || [];
+    return {
+      roomName: room.roomName,
+      seats: seats.length,
+      free: seats.filter(s => !s.userId).length,
+      taken: seats.filter(s => s.userId).length,
+      mine: seats.filter(s => s.userId && String(s.userId) === String(t?.userId))
+        .map(s => ({ spaceName: s.spaceName, seatName: s.seatName, seatId: String(s.seatId) })),
+    };
+  });
+  // 找本店「能操作硬件」的活跃订单：只有 3（已支付）和 6（使用中）才有意义
+  let active = null;
+  try {
+    const ut = await api('/op/store/org/getUserTogether');
+    for (const v of ut?.data?.orderVos || []) {
+      const dd = (await api('/seat/order/queryOrderDetails', { orderId: v.orderId }))?.data || {};
+      if (String(dd.storeId) !== String(storeId)) continue;
+      if (![3, 6].includes(Number(dd.orderStatus))) continue;
+      const now = new Date();
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+      const adv = Number(dd.advanceOpeningTime ?? 0);
+      active = {
+        orderId: v.orderId, orderStatus: dd.orderStatus, statusInfo: statusInfo(dd.orderStatus),
+        date: dd.studyDate, endDate: dd.endStudyDate, begin: dd.studyBeginTime, end: dd.studyEndTime,
+        spaceName: dd.spaceName, seatName: dd.seatName, seatId: String(dd.seatId || ''),
+        lightOpenStatus: dd.lightOpenStatus ?? null,
+        advanceOpeningTime: dd.advanceOpeningTime ?? null,
+        operateHardwareTime: dd.operateHardwareTime ?? null,
+        devices: (dd.buttonNames || []).map(b => ({ buttonName: b.buttonName, deviceId: b.deviceId, manufacturerCode: b.manufacturerCode })),
+        // 能否现在开门 = 现在 >= 开始前 advanceOpeningTime 分钟
+        canOpenNow: dd.studyDate === date ? nowMin >= (toMin(dd.studyBeginTime) - adv) : true,
+        openWindowFrom: adv ? minToHHMM(toMin(dd.studyBeginTime) - adv) : null,
+      };
+      break;
+    }
+  } catch { }
+  let isZero = null;
+  try { isZero = (await isZeroStore(storeId)).ok; } catch { }
+  send(r, {
+    ok: true,
+    now: new Date().toLocaleString('zh-CN', { hour12: false }),
+    date, start, end,
+    isOpen: open?.data === true,
+    bizStart: d.businessStartTime, bizEnd: d.businessEndTime,
+    seatAll: d.storeSeatAll ?? null, seatUsed: d.storeSeatUsed ?? null,
+    rooms, activeOrder: active, isZero,
+  });
+});
+
+// ============ 某座位被占用的时段（= 点占座人头像能看到的东西）============
+// 关键逆向结论：/seat/querySeatSpareTime 名字叫「空闲时段」，但实测返回的是
+// 「该座位已被预约/占用的区间列表」—— 占用座会返回一段包含当前时刻的区间，
+// 空闲座只返回未来的区间（或空数组）。格式 'YYYY-MM-DD HH:mm:ss-YYYY-MM-DD HH:mm:ss'，
+// 日期本身含 '-'，所以只能按固定位置切，不能 split('-')。
+function parseSpareRanges(arr) {
+  const now = Date.now();
+  return (Array.isArray(arr) ? arr : []).map(x => {
+    const s = String(x);
+    const m = s.match(/^(.{19})-(.{19})$/);
+    if (!m) return { raw: s, begin: null, end: null, state: 'unknown' };
+    const bt = new Date(m[1].replace(' ', 'T')).getTime();
+    const et = new Date(m[2].replace(' ', 'T')).getTime();
+    return {
+      raw: s, begin: m[1], end: m[2],
+      state: (now >= bt && now <= et) ? 'now' : (et < now ? 'past' : 'future'),
+    };
+  }).sort((a, b) => String(a.begin).localeCompare(String(b.begin)));
+}
+
+get('/api/occupancy', async (q, _b, r) => {
+  const { storeId, spaceId, seatId } = q;
+  if (!storeId || !spaceId || !seatId) return send(r, { ok: false, msg: '缺少 storeId/spaceId/seatId' }, 400);
+  const date = q.date || new Date().toLocaleDateString('sv-SE');
+  const from = q.from || `${date} 00:00:00`, to = q.to || `${date} 23:59:59`;
+  const [spare, live] = await Promise.all([
+    api('/seat/querySeatSpareTime', { storeId, spaceId, seatId, studyBeginTime: from, studyEndTime: to }),
+    api('/store/live_situation/query', { storeId, startTime: from, endTime: to, chooseWay: 2 }),
+  ]);
+  // 从 live_situation 里捞出这个座位的占座人
+  let occ = null;
+  for (const room of live?.data || []) {
+    for (const s of room.seatSelectionConfigs || []) {
+      if (String(s.seatId) !== String(seatId)) continue;
+      occ = {
+        userId: s.userId ? String(s.userId) : null,
+        photo: s.userPhoto || null,
+        spaceName: s.spaceName, seatName: String(s.seatName),
+        roomName: room.roomName,
+        seatStatus: s.seatStatus, openBookingStatus: s.openBookingStatus, isBlack: s.isBlack,
+      };
+    }
+  }
+  const ranges = parseSpareRanges(spare?.data);
+  const t = decodeToken();
+  send(r, {
+    ok: true,
+    occupant: occ,
+    isMine: !!(occ?.userId && t?.userId && String(occ.userId) === String(t.userId)),
+    ranges,
+    rangeCount: ranges.length,
+    busyNow: ranges.some(x => x.state === 'now'),
+    window: { from, to },
+    note: spare?.success === false ? (spare.msg || '座位时段读取失败') : null,
+  });
+});
+
+// ============ 本店「已被预约的时段」总览 ============
+// live_situation 每个座位只告诉你「谁占着」（userId/userPhoto），没有任何时间字段；
+// 时间只能靠 /seat/querySeatSpareTime 一个座一个座地问。占用座才有意义，所以只问占用座，
+// 并发 8 条，再把相同区间聚合成「哪段时间、被几个座占着」。结果缓存 60 秒，
+// 免得用户在选座页来回切时段时把 26 个座位反复问一遍。
+const agendaCache = new Map();
+const AGENDA_TTL = 60 * 1000;
+
+get('/api/agenda', async (q, _b, r) => {
+  const { storeId } = q;
+  if (!storeId) return send(r, { ok: false, msg: '缺少 storeId' }, 400);
+  const date = q.date || new Date().toLocaleDateString('sv-SE');
+  const from = q.from || `${date} 00:00:00`;
+  const to = q.to || `${date} 23:59:59`;
+  const key = `${storeId}|${from}|${to}`;
+  const hit = agendaCache.get(key);
+  if (hit && Date.now() - hit.at < AGENDA_TTL) return send(r, { ...hit.data, cached: true });
+
+  const live = await api('/store/live_situation/query', { storeId, startTime: from, endTime: to, chooseWay: 2 });
+  const seats = [];
+  for (const room of live?.data || []) {
+    for (const s of room.seatSelectionConfigs || []) {
+      seats.push({
+        seatId: String(s.seatId), spaceId: String(s.spaceId),
+        seatName: String(s.seatName), spaceName: s.spaceName, roomName: room.roomName,
+        userId: s.userId ? String(s.userId) : null, photo: s.userPhoto || null,
+      });
+    }
+  }
+  const t = decodeToken();
+  const occupied = seats.filter(s => s.userId);
+  const done = [];
+  const queue = occupied.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const s = queue.shift();
+      try {
+        const res = await api('/seat/querySeatSpareTime', {
+          storeId, spaceId: s.spaceId, seatId: s.seatId, studyBeginTime: from, studyEndTime: to,
+        });
+        s.ranges = parseSpareRanges(res?.data);
+      } catch { s.ranges = []; }
+      done.push(s);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, occupied.length) || 1 }, worker));
+
+  const byKey = new Map();
+  for (const s of done) {
+    for (const rg of s.ranges) {
+      const k = `${rg.begin}|${rg.end}`;
+      if (!byKey.has(k)) byKey.set(k, { begin: rg.begin, end: rg.end, state: rg.state, raw: rg.raw, seats: [] });
+      byKey.get(k).seats.push({
+        seatId: s.seatId, spaceName: s.spaceName, seatName: s.seatName, roomName: s.roomName,
+        mine: !!(t?.userId && s.userId === String(t.userId)), photo: s.photo,
+      });
+    }
+  }
+  const ranges = [...byKey.values()]
+    .map(x => ({ ...x, seatCount: x.seats.length }))
+    .sort((a, b) => String(a.begin).localeCompare(String(b.begin)));
+
+  const data = {
+    ok: true, date, window: { from, to },
+    seatAll: seats.length, occupied: occupied.length,
+    seatsWithRanges: done.filter(s => s.ranges.length).length,
+    busyNow: ranges.some(x => x.state === 'now'),
+    ranges,
+    note: live?.success === false ? (live.msg || '座位数据读取失败') : null,
+  };
+  agendaCache.set(key, { at: Date.now(), data });
+  send(r, data);
+});
+
+// ============ 人脸门禁：把本人照片传到平台建档 ============
+// 端点来自用户抓的「上传人脸」HAR（51 条，入口 entry[2..10]）：
+//   ① POST /opsli-boot/api/v1/store/home/page/upload/file
+//        multipart/form-data；注意这条路径【不在 /applet 之下】，而且【完全不带 Authorization】，
+//        只认 User-Agent + Referer。返回 {"success":true,"code":200,"data":["<OSS 地址>"]}。
+//   ② POST /opsli-boot/api/v1/applet/user-face/create
+//        JSON {"url":"<OSS 地址>","appId":"wxa5cf43f677b9a059"}
+//        → {"success":true,"msg":"操作成功！","code":200,"data":false}
+//        HAR 里连传三次都是 data:false（新建而不是覆盖），三次都 success:true。
+// 平台没有读接口：user-face 下的 query/info/detail/status/list/delete… 24 个候选名全部 404，
+// 所以问不到「有没有建过脸」，只能上传/覆盖，界面里不能回显状态。
+// 之前的 1398 次爆破之所以没命中，是因为只试了 face / userFace / user/face，没试连字符的 user-face。
+const FACE_FIELD_CANDIDATES = ['file', 'files', 'multipartFile', 'upload', 'image', 'img'];
+
+async function uploadFaceToOss(buf, filename, mime) {
+  loadAuth();
+  const origin = new URL(CONFIG.base).origin;
+  const url = origin + '/opsli-boot/api/v1/store/home/page/upload/file';
+  let lastErr = '（没试）';
+  for (const field of FACE_FIELD_CANDIDATES) {
+    const B = '----wzzface' + Math.random().toString(16).slice(2);
+    const head = Buffer.from(
+      `--${B}\r\nContent-Disposition: form-data; name="${field}"; filename="${filename}"\r\n` +
+      `Content-Type: ${mime}\r\n\r\n`, 'utf8');
+    const tail = Buffer.from(`\r\n--${B}--\r\n`, 'utf8');
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${B}`,
+          'User-Agent': auth.ua,
+          Referer: `https://servicewechat.com/${CONFIG.appId}/205/page-frame.html`,
+        },
+        body: Buffer.concat([head, buf, tail]),
+      });
+      const txt = await res.text();
+      let j = null; try { j = JSON.parse(txt); } catch { /* 非 JSON */ }
+      const got = Array.isArray(j?.data) ? j.data[0] : (typeof j?.data === 'string' ? j.data : null);
+      if (got) return { ok: true, url: got, field, http: res.status };
+      lastErr = `字段名 "${field}" → HTTP ${res.status} ${txt.slice(0, 160)}`;
+    } catch (e) { lastErr = `字段名 "${field}" → ${e.message}`; }
+  }
+  return { ok: false, msg: '照片上传到 OSS 失败：' + lastErr };
+}
+
+post('/api/face', async (_q, body, r) => {
+  const dataUrl = String(body?.dataUrl || '');
+  const m = dataUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,([\s\S]+)$/i);
+  if (!m) return send(r, { ok: false, msg: '需要 dataUrl 字段，形如 data:image/jpeg;base64,…' }, 400);
+  const mime = m[1].toLowerCase();
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length < 1024) return send(r, { ok: false, msg: `图片只有 ${buf.length} 字节，太小了，可能没拍上` }, 400);
+  if (buf.length > 8e6) return send(r, { ok: false, msg: `图片 ${(buf.length / 1048576).toFixed(1)}MB 超过 8MB，先在手机上裁一下` }, 413);
+  if (!body?.confirm) return send(r, { ok: false, needConfirm: true, msg: '这会把你的照片上传到平台并建人脸档，请二次确认' }, 409);
+
+  const up = await uploadFaceToOss(buf, `face-${Date.now()}.jpg`, mime);
+  if (!up.ok) return send(r, { ok: false, msg: up.msg });
+  // 只传 OSS、不建档 —— 用来验通道，不会动你账号上的人脸
+  if (body?.uploadOnly) return send(r, {
+    ok: true, uploadOnly: true, uploadedUrl: up.url, uploadField: up.field,
+    imageBytes: buf.length, msg: '只上传了图片，没有建档（uploadOnly）',
+  });
+  const res = await apiOnce('/user-face/create', null, 'POST', { url: up.url, appId: CONFIG.appId });
+  const ok = res?.success === true;
+  send(r, {
+    ok,
+    uploadedUrl: up.url, uploadField: up.field, imageBytes: buf.length, imageMime: mime,
+    createCode: res?.code, createMsg: res?.msg ?? res?.message, createData: res?.data,
+    raw: res,
+    msg: ok ? '照片已上传平台并建好人脸档' : (res?.msg || '建档失败'),
+    note: '建完档到门禁机上刷脸就行，不必再在网页点开门。平台没有「查有没有建过脸」的读接口，所以这里回显不了状态。',
+  });
+});
+
+// ============ 开门（真实硬件指令，会让门锁动作）============
+// HAR 实证：开门是纯服务端 HTTP —— 请求体里 lat/lon/wifiName/hardwareMessageId 全由客户端提供，
+// 服务端只做「你报的位置离门店够不够近」的判定，再下发指令。HAR 里那两次 317「当前距离过大」
+// 的原因已查明：提交的坐标是 43.86/87.54（乌鲁木齐），而这家绵阳店真实坐标是 31.4534/104.7199，
+// 相距约 2000km。开门容差由门店字段 storeDistanceStipulation 给出（实测 1000 = 1km）。
+// 所以这里默认提交「订单详情自带的门店坐标」。1km 的容差远大于蓝牙作用范围，
+// 这也印证了用户的判断：这个门锁是走网络下发、不是靠蓝牙近场握手的。
+post('/api/door', async (_q, body, r) => {
+  const orderId = body?.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (body?.confirm !== true) {
+    return send(r, { ok: false, blocked: true, needConfirm: true,
+      msg: '开门会给门锁下发真实指令。确认请带 confirm:true 再调一次。' }, 409);
+  }
+  const d = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  if (!d.orderId) return send(r, { ok: false, msg: '订单查不到：' + (d.msg || '可能已被清理') }, 404);
+  const dev = (d.buttonNames || [])[0];
+  if (!dev?.hardwareMessageId) return send(r, { ok: false, blocked: true, msg: '这一单没有返回开门设备（buttonNames 为空）' }, 409);
+
+  // 用门店坐标而不是「我」的坐标：服务端比的是提交点与门店点的直线距离
+  const lat = body?.lat != null ? Number(body.lat) : Number(d.storeLat);
+  const lon = body?.lon != null ? Number(body.lon) : Number(d.storeLon);
+  const wifiName = body?.wifiName != null ? String(body.wifiName) : ((d.storeWifiNames || [])[0] || '');
+
+  const res = await api('/seat/order/openDoor/judgment_condition', null, 'POST', {
+    orderId, storeId: String(d.storeId), lat, lon, wifiName, lockData: null,
+    hardwareMessageId: dev.hardwareMessageId,
+  });
+  // 外层 code=200 只代表「请求收到了」；真正的业务结果在 data.code 里。
+  // 【实测】通过时 data.code = 2000「门已开」；被拒时 317「当前距离过大 不可进行开门」。
+  // 别把 2000 当成错误码 —— 我第一次就写错了，把成功当失败报了。
+  const inner = res?.data || null;
+  const code = inner?.code;
+  const okCode = code === 2000 || code === 200;
+  const readable = {
+    2000: '门已开 —— 门锁收到了指令并已动作（实测通过时返回的就是这个码）。',
+    317: '当前距离过大 —— 服务端认为提交的定位离门店太远（容差 = 门店字段 storeDistanceStipulation，通常 1000m）。',
+    316: '不在可开门时间内 —— 受订单字段 advanceOpeningTime 限制（本单是 20 分钟）。',
+  }[code] || null;
+  send(r, {
+    ok: !!okCode,
+    code, message: inner?.message || null,
+    requestCode: res?.code, raw: inner,
+    sent: { orderId, storeId: String(d.storeId), lat, lon, wifiName, hardwareMessageId: dev.hardwareMessageId, deviceId: dev.deviceId, manufacturerCode: dev.manufacturerCode },
+    orderStatus: d.orderStatus, statusInfo: statusInfo(d.orderStatus),
+    msg: okCode
+      ? `✅ ${inner?.message || '门锁指令已下发'}（data.code=${code}）—— 距离判定通过，服务端已把开门指令发给 deviceId ${dev.deviceId}。`
+      : `❌ 开门被拒（data.code=${code}）：${inner?.message || '未知原因'}${readable ? ' · ' + readable : ''}`,
+  });
+});
+
+// ============ 开灯 / 关灯 ============
+// 实测：POST /seat/order/openLight，JSON 入参（用 form 会 HTTP 415），只需 orderId。
+// 开关状态读订单字段 lightOpenStatus（0 = 关着）。同名单一接口由服务端决定开还是关。
+post('/api/light', async (_q, body, r) => {
+  const orderId = body?.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (body?.confirm !== true) {
+    return send(r, { ok: false, blocked: true, needConfirm: true,
+      msg: '开灯会下发真实灯光指令。确认请带 confirm:true 再调一次。' }, 409);
+  }
+  const d = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  if (!d.orderId) return send(r, { ok: false, msg: '订单查不到：' + (d.msg || '') }, 404);
+  const before = d.lightOpenStatus ?? null;
+
+  // 【实测 2026-10-16】openLight 要求订单处于「使用中」：
+  //   订单「已支付(3)」→ code 100862「当前订单未在进行中 不可进行开灯」
+  //   订单「使用中(6)」→ code 500（msg 为空）。试过只传 orderId / type:0|1|2 /
+  //     lightStatus / openStatus / +appId / +hardwareMessageId+deviceId / door 同款 payload，
+  //     **全部一样返回 500**，所以这个接口没能跑通（form 入参会 415，说明它收 JSON）。
+  // 而「灯」实际是 签到(immediatelySeat) 点亮的、退座(finishStudy) 关掉的。
+  if (d.orderStatus !== 6) {
+    return send(r, { ok: false, blocked: true, stage: 'precheck',
+      orderStatus: d.orderStatus, statusInfo: statusInfo(d.orderStatus),
+      lightBefore: before, lightAfter: before,
+      knownCode: 100862, knownMsg: '当前订单未在进行中 不可进行开灯',
+      msg: `开灯被拒：这个接口要求订单处于「使用中」，本单现在是「${statusInfo(d.orderStatus).label}」。先签到（立即入座）把订单推成「使用中」再开灯。`,
+    });
+  }
+
+  const res = await api('/seat/order/openLight', null, 'POST', { orderId });
+  const inner = res?.data || null;
+  const after = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  const now = after.lightOpenStatus ?? null;
+  const changed = before != null && now != null && before !== now;
+  const broken = res?.code === 500 || inner?.code === 500;
+  send(r, {
+    ok: changed,
+    requestCode: res?.code, innerCode: inner?.code, message: inner?.message || res?.msg || null,
+    lightBefore: before, lightAfter: now, changed,
+    orderStatus: after.orderStatus, statusInfo: statusInfo(after.orderStatus),
+    msg: changed
+      ? `✅ 灯光状态已变化：lightOpenStatus ${before} → ${now}`
+      : broken
+        ? `⚠ 开灯没能生效：/seat/order/openLight 在订单「使用中」时恒定返回 code 500（msg 为空），换各种参数组合都一样 —— 这个接口没跑通。灯其实是「签到」点亮的、「退座」关掉的（本单现在 lightOpenStatus=${now}）。`
+        : `指令已发出（${inner?.message || res?.msg || '操作成功'}），但 lightOpenStatus 仍是 ${now}。`,
+  });
+});
+
+post('/api/leave', async (_q, body, r) => {
+  const orderId = body?.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (body?.confirm !== true) {
+    return send(r, {
+      ok: false, blocked: true, needConfirm: true,
+      msg: '退座不可逆：会立刻结束本次学习、释放座位，已扣的月卡天数不退回。要确认请带 confirm:true 再调一次。',
+    }, 409);
+  }
+  const before = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  if (!before.orderId) return send(r, { ok: false, msg: '订单查不到' }, 404);
+  if (Number(before.orderStatus) === 1) {
+    return send(r, { ok: false, blocked: true, orderStatus: 1,
+      msg: '这一单还是「待支付」，不需要退座 —— 未支付会在 5 分钟后自动失效，别点退座。' }, 409);
+  }
+  const res = await apiForm('/seat/order/finishStudy', { orderId });
+  const inner = res?.data || null;
+  const after = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  const ended = Number(after.orderStatus) === 8;
+  send(r, {
+    ok: ended || res?.success === true,
+    requestCode: res?.code, innerCode: inner?.code, message: inner?.message || res?.msg || null,
+    statusBefore: before.orderStatus, statusAfter: after.orderStatus, statusInfo: statusInfo(after.orderStatus),
+    endBefore: before.studyEndTime, endAfter: after.studyEndTime,
+    msg: `退座结果：orderStatus ${before.orderStatus} → ${after.orderStatus}，结束时间 ${before.studyEndTime} → ${after.studyEndTime}。座位已释放。${inner?.message ? '（服务端：' + inner.message + '）' : ''}`,
+  });
+});
+
+// ============ 到店签到 / 立即入座 ============
+// HAR entry[3] 实证：POST /seat/order/immediatelySeat，**form-urlencoded**，
+// 字段 orderId / lat / lon / wifiName。与开门同一套距离校验（HAR 里返回 999998「距离过大 不可进行立即入座」）。
+// 语义：人到店后点「立即入座」，把这一单从「已支付」推成「使用中」。
+// 注意：这会让座位真正被占用，所以同样要二次确认 + 后端校验 orderStatus。
+post('/api/checkin', async (_q, body, r) => {
+  const orderId = body?.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (body?.confirm !== true) {
+    return send(r, { ok: false, blocked: true, needConfirm: true,
+      msg: '签到会让这个座位立刻变成「占用中」（对你自己的账号生效）。确认请带 confirm:true 再调一次。' }, 409);
+  }
+  const before = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  if (!before.orderId) return send(r, { ok: false, msg: '订单查不到' }, 404);
+  const lat = body?.lat != null ? Number(body.lat) : Number(before.storeLat);
+  const lon = body?.lon != null ? Number(body.lon) : Number(before.storeLon);
+  const wifiName = body?.wifiName != null ? String(body.wifiName) : ((before.storeWifiNames || [])[0] || '');
+  const res = await apiForm('/seat/order/immediatelySeat', { orderId, lat, lon, wifiName });
+  const inner = res?.data || null;
+  const after = (await api('/seat/order/queryOrderDetails', { orderId }))?.data || {};
+  send(r, {
+    ok: res?.code === 200,
+    requestCode: res?.code, innerCode: inner?.code, message: inner?.message || res?.msg || null,
+    statusBefore: before.orderStatus, statusAfter: after.orderStatus, statusInfo: statusInfo(after.orderStatus),
+    sent: { orderId, lat, lon, wifiName },
+    msg: res?.code === 200
+      ? `签到请求成功：orderStatus ${before.orderStatus} → ${after.orderStatus}（${statusInfo(after.orderStatus).label}）。${inner?.message || ''}`
+      : `签到被拒（code=${inner?.code ?? res?.code}）：${inner?.message || res?.msg || '未知原因'}`,
+  });
+});
+
+// ---------- 当前预约 ----------
+// 订单详情 → 前端用的归一化结构（/api/orders 与 /api/order 共用一套字段）
+function normalizeOrder(dd, orderIdFallback = null) {
+  const t = decodeToken();
+  return {
+    orderId: dd.orderId || orderIdFallback, seatType: dd.seatType,
+    storeName: dd.fullName, storeId: dd.storeId, area: dd.detailAddress,
+    spaceName: dd.spaceName, seatName: dd.seatName, seatId: dd.seatId ? String(dd.seatId) : null,
+    date: dd.studyDate, endDate: dd.endStudyDate,
+    begin: dd.studyBeginTime, end: dd.studyEndTime,
+    orderStatus: dd.orderStatus, statusInfo: statusInfo(dd.orderStatus),
+    expiredTime: dd.expiredTime, cardTypeName: dd.cardTypeName, paymentMethod: dd.paymentMethod,
+    storeManagerUrl: dd.storeManagerUrl,
+    devices: (dd.buttonNames || []).map(b => ({ buttonName: b.buttonName, deviceId: b.deviceId, manufacturerCode: b.manufacturerCode, hardwareMessageId: b.hardwareMessageId })),
+    lon: dd.storeLon, lat: dd.storeLat,
+    myUserId: t?.userId,
+    // 到店开门相关的字段：queryOrderDetails 里没有金额字段，钱只在 wechat-order-amt 里出现
+    wifiNames: dd.storeWifiNames || [],
+    advanceOpeningTime: dd.advanceOpeningTime ?? null,   // 可以提前多久开门（分钟）
+    operateHardwareTime: dd.operateHardwareTime ?? null,
+    lightOpenStatus: dd.lightOpenStatus ?? null,
+    longestReservationTime: dd.orderLongestReservationTime ?? null,   // 还能续多久
+    advanceContinueTime: dd.orderAdvanceContinueTime ?? null,         // 提前多久可续
+    extendStatus: dd.extendStatus ?? null,
+    latestExtendOrderId: dd.latestExtendOrderId || null,
+  };
+}
+
+get('/api/orders', async (q, _b, r) => {
+  const ut = await api('/op/store/org/getUserTogether');
+  if (ut?.success === false) return send(r, { ok: false, msg: ut.msg }, 502);
+  const vos = ut?.data?.orderVos || [];
+  const details = await Promise.all(vos.map(async v =>
+    normalizeOrder((await api('/seat/order/queryOrderDetails', { orderId: v.orderId }))?.data || {}, v.orderId)));
+  // 待支付的排前面，方便一眼看到还能处理的单
+  details.sort((a, b) => (a.orderStatus === 1 ? -1 : 1) - (b.orderStatus === 1 ? -1 : 1));
+  send(r, { ok: true, seatOrderNum: ut?.data?.seatOrderNum ?? 0, user: { phone: ut?.data?.userPhone, nick: ut?.data?.nickName }, orders: details });
+});
+
+// ---------- 按订单号查单（能查到已结束、已从「当前预约」里消失的单）----------
+// 重要：/op/store/org/getUserTogether 只返回**活跃**预约 —— 实测一单退座变成 orderStatus 8 之后，
+// 它就从「当前预约」列表里消失了。所以结束后必须靠订单号回查。
+get('/api/order', async (q, _b, r) => {
+  const orderId = String(q.orderId || '').trim();
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  const res = await api('/seat/order/queryOrderDetails', { orderId });
+  const dd = res?.data;
+  if (!dd || !dd.orderId) return send(r, { ok: false, msg: res?.msg || '查不到这一单（订单号是否正确？）' }, 404);
+  // 金额只有「待支付」的单查得到，其余会报「非法的订单号」，失败就置 null 别报错
+  let payAmtFen = null;
+  try { payAmtFen = (await api(`/seat/order/wechat-order-amt/${encodeURIComponent(orderId)}`))?.data?.payAmt ?? null; } catch { }
+  send(r, { ok: true, order: normalizeOrder(dd, orderId), payAmtFen });
+});
+
+// ---------- token 管理 ----------
+const TOKEN_RE = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+const UA_RE = /Mozilla\/5\.0 \(iPhone[^"\\\n]{0,300}MicroMessenger\/[^"\\\n\)]{0,60}\)[^"\\\n]{0,60}/;
+
+/** HAR 里正斜杠被转义成 \/ ，UA 匹配前必须先还原，否则永远抓不到 UA。 */
+function unescapeHarSlash(text) { return String(text).replace(/\\\//g, '/'); }
+
+function extractTokensFromText(text) {
+  const toks = [...new Set((String(text).match(TOKEN_RE) || []))].filter(t => t.length > 60);
+  // token 可能出现在被转义过的 JSON 片段里，两边都试
+  const ua = (unescapeHarSlash(text).match(UA_RE) || [])[0] || null;
+  return {
+    toks: toks.map(t => ({ token: t, ...(decodeToken(t) || {}) })).filter(x => x.exp),
+    ua: ua ? ua.trim() : null,
+  };
+}
+
+function scanHarFiles(limit = 10) {
+  const files = [];
+  for (const dir of HAR_SCAN_DIRS) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      if (!/\.har$/i.test(n)) continue;
+      try {
+        const full = path.join(dir, n);
+        const st = fs.statSync(full);
+        if (!st.isFile() || st.size > 400 * 1024 * 1024) continue;
+        files.push({ file: full, name: n, size: st.size, mtime: st.mtimeMs });
+      } catch { }
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  return files.slice(0, limit);
+}
+
+get('/api/hars', async (_q, _b, r) => {
+  const out = [];
+  for (const f of scanHarFiles(10)) {
+    try {
+      const text = fs.readFileSync(f.file, 'utf8');
+      if (!text.includes('wangzhizhi')) continue;
+      const { toks, ua } = extractTokensFromText(text);
+      const best = toks.sort((a, b) => (b.iat || b.exp) - (a.iat || a.exp))[0];
+      if (!best) continue;
+      out.push({
+        file: f.file, name: f.name, sizeMB: +(f.size / 1048576).toFixed(1),
+        mtimeStr: new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }),
+        exp: best.exp, expStr: new Date(best.exp * 1000).toLocaleString('zh-CN', { hour12: false }),
+        daysLeft: Math.floor((best.exp * 1000 - Date.now()) / 86400000),
+        expired: best.exp * 1000 < Date.now(),
+        hasUa: !!ua, ua: ua || null,
+        userId: best.userId || null,
+      });
+    } catch { }
+  }
+  out.sort((a, b) => b.exp - a.exp);
+  send(r, { ok: true, dirs: HAR_SCAN_DIRS, files: out });
+});
+
+post('/api/token', async (_q, body, r) => {
+  const cur = loadAuth(true);
+  let token = null, ua = null, source = '手动粘贴';
+
+  if (body?.harPath) {
+    const full = path.resolve(String(body.harPath));
+    const allowed = HAR_SCAN_DIRS.some(d => full.startsWith(path.resolve(d) + path.sep) || full === path.resolve(d));
+    if (!allowed) return send(r, { ok: false, msg: '出于安全，只允许读取这些目录下的 HAR：' + HAR_SCAN_DIRS.join('、') }, 403);
+    if (!fs.existsSync(full)) return send(r, { ok: false, msg: '文件不存在：' + full }, 400);
+    const text = fs.readFileSync(full, 'utf8');
+    if (!text.includes('wangzhizhi')) return send(r, { ok: false, msg: '这个 HAR 里没有王知之小程序的请求，抓包时请在小程序里点几下。' }, 400);
+    const ex = extractTokensFromText(text);
+    const best = ex.toks.sort((a, b) => (b.iat || b.exp) - (a.iat || a.exp))[0];
+    if (!best) return send(r, { ok: false, msg: '这个 HAR 里没找到 JWT token。' }, 400);
+    token = best.token; ua = ex.ua || cur.ua;
+    source = path.basename(full);
+  } else if (body?.harText) {
+    const ex = extractTokensFromText(String(body.harText));
+    const best = ex.toks.sort((a, b) => (b.iat || b.exp) - (a.iat || a.exp))[0];
+    if (!best) return send(r, { ok: false, msg: '粘贴的内容里没找到 JWT token。' }, 400);
+    token = best.token; ua = ex.ua || cur.ua; source = '粘贴的抓包内容';
+  } else if (body?.token) {
+    const t = String(body.token).trim();
+    const m = extractTokensFromText(t);
+    token = m.toks[0]?.token || (/^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(t) ? t : null);
+    if (!token) return send(r, { ok: false, msg: '这不像一个 JWT（应为三段 base64，以 eyJ 开头）。' }, 400);
+    ua = body.ua ? String(body.ua).trim() : cur.ua;
+    source = '手动粘贴';
+  } else {
+    return send(r, { ok: false, msg: '请提供 harPath / harText / token 之一' }, 400);
+  }
+
+  const d = decodeToken(token);
+  if (!d?.exp) return send(r, { ok: false, msg: 'token 解析失败（拿不到 exp 字段）' }, 400);
+
+  // 保存前先用新 token 探活一次，把结果一起告诉用户
+  let alive = null, probeMsg = null;
+  try {
+    const probe = await api('/fp/store/org/store-count', null, 'GET', null, 12000, 1, { token, ua });
+    alive = probe?.success === true || probe?.code === 200;
+    probeMsg = alive ? `探活正常（全平台门店数 ${probe.data}）` : (probe?.code === 12002 ? '服务端返回 Token失效(12002) —— UA 可能不匹配' : (probe?.msg || probe?.code || '探活失败'));
+  } catch (e) { probeMsg = e.message; }
+
+  saveAuth({ token, ua, source });
+  send(r, {
+    ok: true, alive, probeMsg, source,
+    token: {
+      exp: d.exp, expStr: new Date(d.exp * 1000).toLocaleString('zh-CN', { hour12: false }),
+      daysLeft: Math.floor((d.exp * 1000 - Date.now()) / 86400000), myUserId: d.userId,
+    },
+    msg: alive
+      ? `token 已更新并生效（${source}），有效期至 ${new Date(d.exp * 1000).toLocaleString('zh-CN', { hour12: false })}`
+      : `token 已写入，但探活没通过：${probeMsg}。若是重抓包的 UA 变了，请确认 HAR 里带上了 MicroMessenger 的 UA。`,
+  });
+});
+
+// ---------- 静态页 ----------
+function serveHtml(res, file) {
+  fs.readFile(path.join(__dirname, file), (err, buf) => {
+    if (err) return send(res, { ok: false, msg: file + ' 缺失：' + err.message }, 500);
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(buf);
+  });
+}
+
+// ======================= 启动 =======================
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, `http://${CONFIG.host}:${CONFIG.port}`);
+    if (u.pathname === '/' || u.pathname === '/index.html') return serveHtml(res, 'ui.html');
+    if (u.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
+    const m = routes.find(rt => rt.method === req.method && rt.pattern === u.pathname);
+    if (!m) return send(res, { ok: false, msg: '不存在：' + u.pathname }, 404);
+    const query = Object.fromEntries(u.searchParams);
+    const body = req.method === 'POST' ? await readBody(req) : null;
+    return await m.handler(query, body, res);
+  } catch (e) {
+    return send(res, { ok: false, msg: '服务端错误：' + e.message }, 500);
+  }
+});
+server.keepAliveTimeout = 65000;
+
+server.listen(CONFIG.port, CONFIG.host, async () => {
+  const a = loadAuth(true);
+  const t = decodeToken(a.token);
+  console.log('');
+  console.log('  ◆ 王知之自习室 · 本地选座下单助手');
+  console.log(`  → 打开 http://${CONFIG.host}:${CONFIG.port}`);
+  console.log(`  → token 来源：${a.source || 'auth.json'}`);
+  if (t) console.log(`  → token 有效期至 ${new Date(t.exp * 1000).toLocaleString('zh-CN', { hour12: false })}（剩 ${Math.floor((t.exp * 1000 - Date.now()) / 86400000)} 天）`);
+  else console.log('  ⚠ token 解析失败，请检查 auth.json');
+  try {
+    const probe = await api('/fp/store/org/store-count', null, 'GET', null, 12000, 1);
+    if (probe?.success === true || probe?.code === 200) console.log('  → token 探活：正常');
+    else console.log(`  ⚠ token 探活失败：${probe?.msg || probe?.code || '未知'} —— 若你在微信里重新登录过，旧 token 会被顶掉；网页「我的 → 更新 token」一键换。`);
+  } catch { }
+  console.log('  → 只订 0 元店；支付（非 0 元）/ 开门 / 取消请回原 App');
+  try {
+    const z = await getZeroStores();
+    console.log(`  → 月卡 0 元覆盖：${z.total} 家${z.stale ? `（种子兜底，实时拉取失败：${z.failMsg || ''}）` : ''}`);
+  } catch { }
+  console.log('');
+});
