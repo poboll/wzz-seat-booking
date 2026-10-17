@@ -158,7 +158,11 @@ const ORDER_STATUS = {
   3: { label: '已支付（待使用）', tone: 'ok', conf: 'confirmed', hint: '钱/卡已结清。到时段前后可以开门、开灯。' },
   6: { label: '使用中', tone: 'blue', conf: 'confirmed', hint: '当前正处于预约时段内，座位已锁定。此状态下能开门 / 开灯 / 退座。' },
   4: { label: '已取消', tone: 'mute', conf: 'confirmed', hint: '用「取消预约」撤销了这单，座位已释放、月卡天数不退。' },
-    8: { label: '已结束', tone: 'mute', conf: 'confirmed', hint: '已退座或时段已过。座位已释放，无法再开门。' },
+  8: { label: '已结束', tone: 'mute', conf: 'confirmed', hint: '已退座或时段已过。座位已释放，无法再开门。' },
+  // 下面两档来自 querySeatOrderList 的历史单观察（账号里 5 有 7 张、7 有 2 张），
+  // 平台不返回文字状态、App 是前端映射的，所以标 inferred，请以原 App 显示为准。
+  5: { label: '已完成', tone: 'mute', conf: 'inferred', hint: '历史单里最常见的终态。平台不返回文案，此标签是按分布推断的。' },
+  7: { label: '已关闭', tone: 'mute', conf: 'inferred', hint: '历史单里出现过的终态，疑似「未到店 / 已过期」。请以原 App 显示为准。' },
 };
 
 function statusInfo(code) {
@@ -1147,15 +1151,79 @@ function normalizeOrder(dd, orderIdFallback = null) {
   };
 }
 
+// ---------- 订单历史（querySeatOrderList）----------
+// 实测：GET /seat/order/querySeatOrderList?pageNo&pageSize 分页返回历史单。
+// 单条字段只有 11 个：orderId / fullName / orderStatus / areaName / studyDate /
+// startTime / endTime / spaceName / seatName / seatId / periodTime。
+// ⚠ 返回体里的 pageCount 字段不可信（实测等于条数），所以直接翻到空页为止。
+async function fetchOrderList(maxPages = 20, pageSize = 50) {
+  const out = [];
+  for (let p = 1; p <= maxPages; p++) {
+    const r = await api('/seat/order/querySeatOrderList', { pageNo: p, pageSize, appId: CONFIG.appId });
+    const d = r?.data || {};
+    const lst = d.seatOrderListList || d.seatOrderList || [];
+    if (!lst.length) break;
+    out.push(...lst);
+    if (lst.length < pageSize) break;
+  }
+  return out;
+}
+
+function normalizeListOrder(o) {
+  const st = Number(o.orderStatus);
+  const day = String(o.studyDate || o.startTime || '').slice(0, 10);
+  return {
+    orderId: o.orderId, orderStatus: st, statusInfo: statusInfo(st),
+    storeName: o.fullName, areaName: o.areaName, spaceName: o.spaceName, seatName: o.seatName,
+    seatId: o.seatId != null ? String(o.seatId) : null,
+    date: o.studyDate, day, begin: o.startTime, end: o.endTime,
+    active: [1, 3, 6].includes(st),
+  };
+}
+
+// 本机时区今天 00:00 往前推 n 天的毫秒值
+function dayStartMs(daysAgo = 0) {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  return d.getTime() - daysAgo * 86400000;
+}
+
 get('/api/orders', async (q, _b, r) => {
-  const ut = await api('/op/store/org/getUserTogether');
-  if (ut?.success === false) return send(r, { ok: false, msg: ut.msg }, 502);
-  const vos = ut?.data?.orderVos || [];
-  const details = await Promise.all(vos.map(async v =>
-    normalizeOrder((await api('/seat/order/queryOrderDetails', { orderId: v.orderId }))?.data || {}, v.orderId)));
-  // 待支付的排前面，方便一眼看到还能处理的单
-  details.sort((a, b) => (a.orderStatus === 1 ? -1 : 1) - (b.orderStatus === 1 ? -1 : 1));
-  send(r, { ok: true, seatOrderNum: ut?.data?.seatOrderNum ?? 0, user: { phone: ut?.data?.userPhone, nick: ut?.data?.nickName }, orders: details });
+  const all = q.all === '1';
+  const days = all ? null : Math.max(1, Number(q.days || 3));
+
+  // ① 当前预约：getUserTogether 只返回**活跃**单，结束/取消后立刻消失
+  let active = [], user = null, seatOrderNum = 0;
+  try {
+    const ut = await api('/op/store/org/getUserTogether');
+    if (ut?.success !== false) {
+      user = ut?.data ? { phone: ut.data.userPhone, nick: ut.data.nickName } : null;
+      seatOrderNum = ut?.data?.seatOrderNum ?? 0;
+      const vos = ut?.data?.orderVos || [];
+      active = await Promise.all(vos.map(async v =>
+        normalizeOrder((await api('/seat/order/queryOrderDetails', { orderId: v.orderId }))?.data || {}, v.orderId)));
+      // 待支付排最前，方便一眼看到还能处理的
+      active.sort((a, b) => (a.orderStatus === 1 ? -1 : 1) - (b.orderStatus === 1 ? -1 : 1));
+    }
+  } catch { }
+
+  // ② 历史单：默认只给最近 3 天；?all=1 给全部
+  let history = [], historyAll = 0;
+  try {
+    const list = (await fetchOrderList()).map(normalizeListOrder);
+    historyAll = list.length;
+    const activeIds = new Set(active.map(o => o.orderId));
+    history = list.filter(o => !activeIds.has(o.orderId));
+    if (!all && days != null) {
+      const from = dayStartMs(days - 1);
+      history = history.filter(o => {
+        const t = Date.parse(String(o.date || '').replace(' ', 'T'));
+        return isNaN(t) ? true : t >= from;
+      });
+    }
+  } catch { }
+
+  send(r, { ok: true, seatOrderNum, user, orders: active,
+            history, historyAll, days, statusMap: ORDER_STATUS });
 });
 
 // ---------- 按订单号查单（能查到已结束、已从「当前预约」里消失的单）----------
@@ -1178,6 +1246,83 @@ get('/api/order', async (q, _b, r) => {
     if (sid) cancelRule = (await api(`/seat/order/${encodeURIComponent(sid)}/queryCancelRule`))?.data || null;
   } catch { }
   send(r, { ok: true, order: normalizeOrder(dd, orderId), payAmtFen, cancelRule });
+});
+
+// ---------- 换座 ----------
+// POST /seat/order/changeSeat —— form-urlencoded。
+// ⚠ 未实测：换座必须有**活跃**订单才能验证，而账号目前被平台拉黑没法建单。
+//   已实测的只有一件事：拿「已取消」「已结束」的单去调，它照样返回 code 200「操作成功！」
+//   却什么都不改 —— 说明它只看订单号格式、不看订单状态。
+//   所以**绝不能拿返回码判成功，必须回读 seatId 有没有真的变成目标座位**。
+post('/api/changeSeat', async (_q, b, r) => {
+  const orderId = b.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (!b.seatId) return send(r, { ok: false, msg: '缺少要换到的 seatId' }, 400);
+  if (b.confirm !== true) {
+    return send(r, { ok: false, blocked: true, needConfirm: true,
+      msg: '换座会释放当前座位并占用新座位，需要二次确认' }, 409);
+  }
+  const form = { orderId: String(orderId), seatId: String(b.seatId), appId: CONFIG.appId };
+  if (b.spaceId) form.spaceId = String(b.spaceId);
+  if (b.storeId) form.storeId = String(b.storeId);
+
+  const before = await api('/seat/order/queryOrderDetails', { orderId });
+  let res = null, err = null;
+  try { res = await apiForm('/seat/order/changeSeat', form); } catch (e) { err = e.message; }
+  const after = await api('/seat/order/queryOrderDetails', { orderId });
+
+  const bSeat = before?.data?.seatId != null ? String(before.data.seatId) : null;
+  const aSeat = after?.data?.seatId != null ? String(after.data.seatId) : null;
+  const changed = !!(aSeat && aSeat === String(b.seatId) && aSeat !== bSeat);
+
+  send(r, {
+    ok: changed, verified: false, raw: res, err, sent: form,
+    before: { seatId: bSeat, seatName: before?.data?.seatName, spaceName: before?.data?.spaceName },
+    after: { seatId: aSeat, seatName: after?.data?.seatName, spaceName: after?.data?.spaceName },
+    msg: changed ? '换座成功（已回读确认座位变了）'
+      : `没换成功${err ? '：' + err : `：平台回 ${res?.code ?? '?'} ${res?.msg || ''}`}；座位仍是 ${after?.data?.seatName || '?'}`,
+  });
+});
+
+// ---------- 延长时间 ----------
+// 平台没有独立的「延长」接口 —— 60 个候选名（extendOrder / continueOrder / renewOrder …）
+// 在 /seat/order/ 下全部 404。延长走的就是 changeTheTime（它请求体里本来就有 extendOrderId）。
+// ⚠ 未实测：changeTheTime 的必填字段用死单只能探到第二层
+//   （给 orderId 说「支付账号不能为空」，再给 type 说「支付方式不能为空」就断了），
+//   要确定 type / extendOrderId / 支付方式 的组合必须有活跃订单。
+post('/api/extend', async (_q, b, r) => {
+  const orderId = b.orderId;
+  if (!orderId) return send(r, { ok: false, msg: '缺少 orderId' }, 400);
+  if (b.confirm !== true) {
+    return send(r, { ok: false, blocked: true, needConfirm: true,
+      msg: '延长会按门店规则继续占用座位并可能扣减月卡时长，需要二次确认' }, 409);
+  }
+  const before = await api('/seat/order/queryOrderDetails', { orderId });
+  const d = before?.data || {};
+  const body = {
+    orderId: String(orderId),
+    userCardId: b.userCardId || d.userCardId || CONFIG.zeroCardId,
+    cardId: null,
+    cardTypeCode: b.cardTypeCode || 'DAY',
+    ruleId: null,
+    extendOrderId: b.extendOrderId != null ? b.extendOrderId : (d.latestExtendOrderId || ''),
+    type: b.type != null ? b.type : 2,
+    izWeChatPay: false,
+    appId: CONFIG.appId,
+  };
+  let res = null, err = null;
+  try { res = await apiOnce('/seat/order/changeTheTime', null, 'POST', body); } catch (e) { err = e.message; }
+  const after = await api('/seat/order/queryOrderDetails', { orderId });
+
+  const bEnd = d.studyEndTime, aEnd = after?.data?.studyEndTime;
+  const changed = !!(aEnd && bEnd && String(aEnd) !== String(bEnd));
+  send(r, {
+    ok: changed, verified: false, raw: res, err, sent: body,
+    before: { end: bEnd, advanceContinueTime: d.orderAdvanceContinueTime ?? null, longestReservationTime: d.orderLongestReservationTime ?? null },
+    after: { end: aEnd, extendStatus: after?.data?.extendStatus ?? null, latestExtendOrderId: after?.data?.latestExtendOrderId ?? null },
+    msg: changed ? '延长成功（已回读确认结束时间变了）'
+      : `没延长成功${err ? '：' + err : `：平台回 ${res?.data?.code ?? res?.code ?? '?'} ${res?.data?.message || res?.msg || ''}`}`,
+  });
 });
 
 // ---------- token 管理 ----------
@@ -1297,10 +1442,18 @@ post('/api/token', async (_q, body, r) => {
 });
 
 // ---------- 静态页 ----------
-function serveHtml(res, file) {
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.png': 'image/png', '.ico': 'image/x-icon', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml',
+};
+function serveFile(res, file) {
   fs.readFile(path.join(__dirname, file), (err, buf) => {
     if (err) return send(res, { ok: false, msg: file + ' 缺失：' + err.message }, 500);
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    const ext = path.extname(file).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': ext === '.html' ? 'no-store' : 'public, max-age=86400',
+    });
     res.end(buf);
   });
 }
@@ -1309,8 +1462,10 @@ function serveHtml(res, file) {
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, `http://${CONFIG.host}:${CONFIG.port}`);
-    if (u.pathname === '/' || u.pathname === '/index.html') return serveHtml(res, 'ui.html');
-    if (u.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
+    if (u.pathname === '/' || u.pathname === '/index.html') return serveFile(res, 'ui.html');
+    // favicon：用平台自己的小程序 logo（/fp/photo/org/getAppletMessage 里那条 小程序logo.png）
+    if (u.pathname === '/favicon.ico' || u.pathname === '/favicon.png') return serveFile(res, 'favicon.png');
+    if (u.pathname === '/apple-touch-icon.png') return serveFile(res, 'apple-touch-icon.png');
     const m = routes.find(rt => rt.method === req.method && rt.pattern === u.pathname);
     if (!m) return send(res, { ok: false, msg: '不存在：' + u.pathname }, 404);
     const query = Object.fromEntries(u.searchParams);

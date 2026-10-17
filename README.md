@@ -163,3 +163,56 @@ op/store/org/getUserTogether   当前预约列表
 - 各接口 body 格式不统一：`finishStudy`/`immediatelySeat` 只认 **form-urlencoded**，`openLight`/`judgment_condition` 只认 **JSON**（传错分别报「订单号不能为空」/ HTTP 415）。
 - 订单号格式校验很严：`YYYYMMDDHHmmssSSS-` 后接**恰好 14 字符**。探接口请用**格式合法但不存在的**假单号，别拿真单试破坏性接口。
 - 本机 Chrome 无头 + CDP（原生 `WebSocket` 直连）可以驱动真实浏览器做 DOM 断言，用来替代肉眼看截图。
+
+
+## 订单历史 / 换座 / 延长（第三轮补充）
+
+### 订单从哪来
+| 用途 | 接口 | 说明 |
+|---|---|---|
+| **当前预约** | `GET /op/store/org/getUserTogether` | 只返回**活跃**单；一单退座/取消后立刻从这里消失 |
+| **历史订单** | `GET /seat/order/querySeatOrderList?pageNo&pageSize` | 全量历史，翻到空页为止。`/api/orders` 默认给**近 3 天**（`?all=1` 给全部） |
+
+`querySeatOrderList` 的单条字段：`orderId / fullName / orderStatus / areaName / studyDate / startTime / endTime / spaceName / seatName / seatId / periodTime`。
+它**不返回状态文案**，只有数字。`/api/orders` 把 `statusMap`（即下面的枚举）一并下发，前端自己映射。
+
+### orderStatus 枚举（实测来源标在括号里）
+| 码 | 含义 | 依据 |
+|---|---|---|
+| 1 | 待支付 | 实证 |
+| 3 | 已支付（待使用） | 实证 |
+| 4 | 已取消 | 实证（`cancelReservation` 后 3 → 4） |
+| 5 | 已完成 | **推断**（只在历史列表里见过，没在 App 界面对过） |
+| 6 | 使用中 | 实证 |
+| 7 | 已结束 | **推断**（同上） |
+| 8 | 已结束（退座） | 实证（`finishStudy` 后 6 → 8） |
+
+### 换座
+`POST /seat/order/changeSeat`，**form-urlencoded**：`orderId` + `seatId`（要换到的新座位）+ 可选 `spaceId` / `storeId`。
+
+> ⚠ 这个接口**用已结束/已取消的单调用也会返回 `code 200 操作成功！`，但什么都不改**。
+> 所以 `/api/changeSeat` **不信响应码，只认回读**：拿 `queryOrderDetails` 回读 `seatId`，变了才算成功。
+> 参数名是按平台命名习惯推的，**没能在活跃订单上实测**（账号被平台限制建单）。
+
+### 延长时间
+平台**没有独立的延长接口**（`/seat/order/` 下 60 个候选路径全 404）。延长走的就是 `changeTheTime` ——
+它的请求体里本来就有 `extendOrderId` 字段。
+
+> ⚠ 参数未实测。用已结束/已取消的单能探到的必填链是：`orderId` → `type` → 「支付方式不能为空」（再往下就断了）。
+> `/api/extend` 会带上 `extendOrderId` 发一次，并把服务端**原样返回**给你看，成功与否以**回读结束时间有没有变**为准。
+
+### 人脸门禁
+`POST /store/home/page/upload/file`（multipart，字段名 **`file`**，**不在 `/applet` 下、不带 Authorization**，只认 UA + Referer）
+→ 返回 OSS URL → `POST /applet/user-face/create`（JSON `{url, appId}`，`data:true`=更新 `false`=新建）。
+
+**注意：这是真的会建/覆盖人脸档，而平台没有删除接口。** 所以 `/api/face` 必须带 `confirm:true`，
+开发时用 `uploadOnly:true` 只验证上传通道、不建档。
+
+### 座位坐标系
+官方小程序的座位定位是 `left/top` = **左上角**，而早先这版按「中心点」画（`transform:translate(-50%,-50%)`），
+整体会偏半个座位宽 —— 这就是「头像没落在座位点上」的成因。
+`.map.anchor-tl` / `.map.anchor-c` 两个 class 对应两种坐标系，选座页有开关，默认 **左上角**，记在 `localStorage`。
+
+### 品牌色
+`GET /console_show/colorShow` 实测返回 **`#0052D9`** —— 王知之的品牌色是**蓝色**，不是微信绿。
+界面主色已改为它。小程序 logo 从 `GET /fp/photo/org/getAppletMessage` 拿到，就是根目录的 `favicon.png` / `apple-touch-icon.png`。
