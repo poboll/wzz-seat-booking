@@ -765,6 +765,17 @@ PAGES.orders = () => `
   </div>`;
 
 /* —— 预约详情（二级页）—— */
+/* 统一应用 /api/order 的返回：订单对象 + 金额 + **取消规则**。
+   取消规则必须跟着订单一起来，否则「先看门店详情才有规则」这种隐式依赖
+   会让直接打开订单时算不对 30 分钟窗口。 */
+function applyOrder(r) {
+  if (!r || !r.order) return null;
+  state.orderDetail = r.order;
+  if (r.payAmtFen != null) state.orderDetail.payAmtYuan = r.payAmtFen / 100;
+  if (r.cancelRule) { state.orderDetail.cancelRule = r.cancelRule; state.cancelRule = r.cancelRule; }
+  return state.orderDetail;
+}
+
 PAGES.order = () => {
   const o = state.orderDetail;
   if (!o) return '<div class="empty">订单不存在</div>';
@@ -774,6 +785,17 @@ PAGES.order = () => {
   const live = [3, 6].includes(code);        // 已支付 / 使用中 才能碰硬件
   const hasDev = !!(o.devices && o.devices.length);
   const canCancel = code === 3;              // 实测：只有「已支付」能取消（待支付返回 999998）
+  // 门店取消规则：开始前 need 分钟内取消算违约，扣 deduct 分钟
+  const rule = o.cancelRule || null;
+  const need = Number((rule && rule.aheadCancelBookingMinutes) != null ? rule.aheadCancelBookingMinutes : 30);
+  const deduct = Number((rule && rule.bookingAheadCloseDeductMinutes) != null ? rule.bookingAheadCloseDeductMinutes : 30);
+  let leadMin = null;                        // 离开车还有多少分钟
+  {
+    const bt = o.beginTime || o.studyBeginTime;
+    const t = bt ? new Date(String(bt).replace(' ', 'T')).getTime() : NaN;
+    if (!isNaN(t)) leadMin = Math.floor((t - Date.now()) / 60000);
+  }
+  const inPenalty = leadMin != null && leadMin >= 0 && leadMin < need;
   const cancelWhy = code === 1 ? '待支付的单平台不让取消，等它自动失效'
     : code === 6 ? '已在用，请点「退座」' : code === 4 ? '这一单已经取消过了' : code === 8 ? '这一单已经结束' : '';
   return `
@@ -790,6 +812,13 @@ PAGES.order = () => {
         <div class="c-extra">${esc(o.date || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}${o.endDate && o.endDate !== o.date ? '（至 ' + esc(o.endDate) + '）' : ''}</div></div>
       <div class="cell"><div class="c-main"><div class="c-title">订单号</div></div><div class="c-extra mono">${esc(o.orderId)}</div></div>
       ${o.cardTypeName ? `<div class="cell"><div class="c-main"><div class="c-title">结算</div></div><div class="c-extra">${esc(o.cardTypeName)} · 实付 ¥0</div></div>` : ''}
+      <div class="cell" style="display:block">
+        <div class="c-title">取消规则</div>
+        <div class="c-desc">开始前 ${need} 分钟以上取消不扣减；${need} 分钟以内算违约，扣 ${deduct} 分钟</div>
+        ${leadMin == null ? '' : inPenalty
+          ? `<div style="margin-top:6px"><span class="pill warn">离开车 ${leadMin} 分钟 · 已进扣减区间</span></div>`
+          : `<div style="margin-top:6px"><span class="pill ok">离开车 ${leadMin} 分钟 · 现在取消不扣减</span></div>`}
+      </div>
     </div>
 
     <div class="actions">
@@ -865,7 +894,7 @@ PAGES.store = () => {
         <div class="c-extra"><span class="pill blue">${esc(String(state.cancelRule.aheadCancelBookingMinutes ?? 30))} 分钟</span></div></div>` : ''}
       ${s.pledge && s.pledge.length ? s.pledge.map(t => `<div class="cell"><div class="c-main"><div class="c-desc">${esc(t)}</div></div></div>`).join('') : ''}
     </div>
-    <div class="notice gray" style="margin-bottom:18px">本工具不会替你在原 App 取消订单 —— 平台没有暴露取消接口（HAR 53 个接口 0 命中）。上面是门店返回的取消规则，供你决定什么时候下单。</div>
+    <div class="notice gray" style="margin-bottom:18px">取消预约只能对「已支付」的单做；待支付的单平台会直接拒绝。上面是门店返回的取消规则，供你判断什么时候下单、什么时候取消。</div>
   </div>`;
 };
 
@@ -1379,7 +1408,7 @@ AFTER.order = (el) => {
   const refresh = async (cls, html) => {
     try {
       const d = await jget('/api/order?orderId=' + encodeURIComponent(o.orderId));
-      if (d && d.order) state.orderDetail = d.order;
+      if (d && d.order) applyOrder(d);
     } catch { }
     render('order', 'none');
     const p2 = viewport.querySelector('.page');
@@ -1500,7 +1529,7 @@ async function confirmOrder(el) {
         下单会生成一张<b>待支付</b>订单，接着用月卡抵扣 → 实付 <b>¥0</b>、月卡扣 <b>1 天</b>、订单直接变<b>已支付</b>。
       </div>
       <div class="notice red" style="margin:10px 12px 16px">
-        <b>抵扣不可撤销</b>：平台没有取消 / 退卡接口，扣掉的 1 天要不回来。
+        <b>取消不退天数</b>：实测抵扣前后卡内天数不变，取消只释放座位。
         ${rule ? `门店规则：开始前 ${rule.aheadCancelBookingMinutes ?? 30} 分钟以上取消不扣费。` : ''}
         下单后可以在「预约」详情页开门 / 开灯 / 退座；退座会立刻结束学习、释放座位，但这 1 天也不会退回。
       </div>
@@ -1560,7 +1589,7 @@ async function doSettle(orderId, payYuan) {
     title: '用月卡抵扣？',
     body: `订单 <span class="mono">${esc(orderId)}</span><br>
       原价 <b>${yuan(payYuan)}</b> → 实付 <b class="red">¥0</b>，月卡扣 <b>1 天</b><br><br>
-      <span class="red">抵扣后订单直接变「已支付」。</span>平台没有取消 / 退卡接口，<b>扣掉的天数要不回来</b>。`,
+      <span class="red">抵扣后订单直接变「已支付」。</span>取消预约只释放座位，<b>不会退还已扣天数</b>。`,
     ok: '确认抵扣', cancel: '再想想', danger: true,
   });
   if (!ok) return;
@@ -1630,8 +1659,7 @@ function paintHistory(el) {
     toast('正在回查…');
     const r = await jget('/api/order?orderId=' + encodeURIComponent(h.orderId));
     if (!r.ok) { toast(r.msg || '查不到这一单', 'wide'); return; }
-    state.orderDetail = r.order;
-    if (r.payAmtFen != null) state.orderDetail.payAmtYuan = r.payAmtFen / 100;
+    applyOrder(r);
     pushHistory(state.orderDetail);
     push('order');
   });
@@ -1643,8 +1671,7 @@ async function lookupOrder(el) {
   if (!orderId) { toast('先填订单号'); return; }
   const r = await jget('/api/order?orderId=' + encodeURIComponent(orderId));
   if (!r.ok) { toast(r.msg || '查不到这一单', 'wide'); return; }
-  state.orderDetail = r.order;
-  if (r.payAmtFen != null) state.orderDetail.payAmtYuan = r.payAmtFen / 100;
+  applyOrder(r);
   pushHistory(state.orderDetail);
   push('order');
 }
@@ -1682,7 +1709,7 @@ async function loadOrders(force) {
     </div>`;
   }).join('') + `<div class="tip" style="padding-bottom:24px">${state.orders.some(o => o.orderStatus === 1)
     ? '有<b>待支付</b>订单：点进去可以看到订单号，抵扣请在「门店 → 选座」流程里做，或直接在原 App 支付。'
-    : '点进详情页可以直接<b>开门 / 开灯 / 退座</b>（真实硬件与座位操作）。平台没有取消 / 改签接口，那两项仍需回原 App。'}</div>`;
+    : '点进详情页可以<b>提前入座 / 开门 / 退座 / 取消预约</b>（真实的座位与硬件操作，都要二次确认）。改签平台没有接口。'}</div>`;
   box.querySelectorAll('.ocard').forEach(c => c.onclick = () => {
     state.orderDetail = state.orders[+c.dataset.i];
     push('order');
@@ -1854,10 +1881,9 @@ async function saveToken(el, body) {
 }
 
 function paintTabBadge(s) {
-  const t = s.token || {};
-  const alive = s.tokenAlive;
   if (!$('#tab-badge')) return;
-  // tabBar 上只在有待支付订单时显示红点，token 状态放「我的」页
+  // 订单 tab 的红点由 loadOrders → setBadge(待支付单数量) 负责；
+  // token 状态只在「我的」页展开，tabBar 上不重复提示，所以这里只存状态。
   state.status = s;
 }
 

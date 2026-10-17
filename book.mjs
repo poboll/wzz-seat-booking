@@ -1170,7 +1170,14 @@ get('/api/order', async (q, _b, r) => {
   // 金额只有「待支付」的单查得到，其余会报「非法的订单号」，失败就置 null 别报错
   let payAmtFen = null;
   try { payAmtFen = (await api(`/seat/order/wechat-order-amt/${encodeURIComponent(orderId)}`))?.data?.payAmt ?? null; } catch { }
-  send(r, { ok: true, order: normalizeOrder(dd, orderId), payAmtFen });
+  // 取消规则随订单一起给前端：用户关心「提前多久取消不算违约」。
+  // 不能依赖前端 state.cancelRule —— 那条路径要求先访问过门店详情页，直接打开订单就没有。
+  let cancelRule = null;
+  try {
+    const sid = dd.storeId || dd.orgId;
+    if (sid) cancelRule = (await api(`/seat/order/${encodeURIComponent(sid)}/queryCancelRule`))?.data || null;
+  } catch { }
+  send(r, { ok: true, order: normalizeOrder(dd, orderId), payAmtFen, cancelRule });
 });
 
 // ---------- token 管理 ----------
