@@ -77,7 +77,13 @@ token 与 `User-Agent` **绑死**：UA 里微信版本号只差一位，服务�
 | 开门 | `POST /seat/order/openDoor/judgment_condition` | ✅ 实测通（返回 `data.code 2000 门已开`） |
 | 签到（到店入座） | `POST /seat/order/immediatelySeat` | ✅ 实测通（`329 立即入座成功`，订单 → 使用中） |
 | 退座（结束本次学习） | `POST /seat/order/finishStudy` | ✅ 实测通（`325`，订单 → 8 已结束，座位立即释放） |
+| 取消预约 | `POST /seat/order/cancelReservation` | ✅ 实测通（`328`，订单 → **4 已取消**，座位立即释放）<br>⚠️ **只对「已支付」的单有效**，待支付返回 `999998 取消预约失败` |
 | 开灯 | `POST /seat/order/openLight` | ❌ 没跑通（有活跃订单时恒 `code 500` 空 msg；无活跃订单时 `100862`） |
+
+**关于「提前 30 分钟取消」**：门店规则由 `GET /seat/order/{storeId}/queryCancelRule` 给出，
+`aheadCancelBookingMinutes=30` 内取消算违约、按 `bookingAheadCloseDeductMinutes=30` 扣减。
+订单详情页会按开始时间**实时判定**并显示绿/橙提示。
+⚠️ 但要清楚：**取消不退月卡天数**（实测抵扣前后 `remainValue` 不变）。
 
 **关于「开门要在 1km 内」**：那是**客户端自报坐标**，服务端只比「你报的位置 ↔ 门店坐标」的直线距离，
 容差 = 门店字段 `storeDistanceStipulation`（实测 1000m）。请求体里 `lat/lon/wifiName/hardwareMessageId` 全部由客户端给。
@@ -138,12 +144,14 @@ seat/order/queryOrderDetails   订单详情（设备 / 灯光 / 可提前开门�
 seat/order/openDoor/judgment_condition  开门
 seat/order/immediatelySeat     签到 / 立即入座
 seat/order/finishStudy         退座 / 结束学习
+seat/order/cancelReservation   取消预约（form-urlencoded，只对已支付单有效）
+card/user_cards                用户全部卡券（无需入参）——月卡余额/截止日期的权威来源
 store/home/page/upload/file    人脸照片传 OSS（不带 Authorization）
 user-face/create               人脸建档
 op/store/org/getUserTogether   当前预约列表
 ```
 
-**orderStatus 枚举**（实测）：`1` 待支付 · `3` 已支付待使用 · `6` 使用中 · `8` 已结束。
+**orderStatus 枚举**（实测）：`1` 待支付 · `3` 已支付待使用 · `4` **已取消** · `6` 使用中 · `8` 已结束。
 
 ---
 
