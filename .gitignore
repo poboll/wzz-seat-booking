@@ -1,0 +1,10 @@
+# 你的凭证 —— 等于实名账号，绝不要提交
+auth.json
+
+# 运行产物
+*.log
+nohup.out
+
+# 系统垃圾
+.DS_Store
+node_modules/
