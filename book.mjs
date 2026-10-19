@@ -38,6 +38,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// 内嵌资源：云端（Vercel serverless）函数包里没有 ui.html / 种子文件，
+// 所以在同一目录生成 ui-html.js / zero-seed.js，import 时直接拿到字符串。
+// 本机运行时同样优先用内嵌，逻辑一致、行为统一。
+import { UI_HTML } from './ui-html.js';
+import { ZERO_SEED } from './zero-seed.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ======================= CONFIG =======================
@@ -86,11 +92,26 @@ const DEFAULT_AUTH = {
 const AUTH_FILE = path.join(__dirname, 'auth.json');
 const HAR_SCAN_DIRS = [path.join(os.homedir(), 'Downloads'), path.join(__dirname, '..')];
 
-// ======================= auth.json（热加载） =======================
+// ======================= auth（env 优先，auth.json 兜底） =======================
+// 云端部署（Vercel）：token/ua 来自环境变量 WZZ_TOKEN / WZZ_UA，不落盘。
+// 本机部署：仍然读 auth.json，行为不变。
 let auth = null, authMtime = 0, authCheckedAt = 0;
+
+function envAuth() {
+  const t = String(process.env.WZZ_TOKEN || '').trim();
+  if (t.length < 40) return null;
+  return {
+    token: t,
+    ua: String(process.env.WZZ_UA || '').trim() || DEFAULT_AUTH.ua,
+    savedAt: null,
+    source: '环境变量 WZZ_TOKEN',
+  };
+}
 
 function loadAuth(force = false) {
   const now = Date.now();
+  const ev = envAuth();
+  if (ev) return ev;                    // 云端：env 有就用 env，不碰文件
   if (!force && auth && now - authCheckedAt < 2000) return auth;
   authCheckedAt = now;
   try {
@@ -109,10 +130,39 @@ function loadAuth(force = false) {
 
 function saveAuth(next) {
   const payload = { token: next.token, ua: next.ua, savedAt: new Date().toISOString(), source: next.source || '手动更新' };
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  auth = { ...payload };
-  authMtime = fs.statSync(AUTH_FILE).mtimeMs;
+  // 云端只存内存（serverless 文件系统只读）；本机才写 auth.json
+  try {
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    auth = { ...payload };
+    authMtime = fs.statSync(AUTH_FILE).mtimeMs;
+  } catch {
+    auth = { ...payload };
+  }
   return auth;
+}
+
+// ======================= 访问控制（仅写操作需要登录密钥） =======================
+// 公开访问的部分（任何人都能看）：门店清单 / 门店详情 / 座位图 / 订单查询 / 卡片 / 状态 / 占座。
+// 需要「登录密钥」的部分：一切会动你账号的操作 —— 订座、结算、开门、签到、退座、取消、
+//   换座、延长、人脸建档、以及更新 token 本身。
+// 设计意图：部署到公网时，浏览门店、看座位图完全开放；只有「真正下单 / 操作硬件」时才
+//   要求输入登录密钥（前端在对应按钮处弹出，用的是项目自带的弹窗样式，不是整站门禁）。
+// 本机跑（不设 WZZ_ACCESS_KEY）：全部放行，行为不变。
+// 密钥取值：环境变量 WZZ_ACCESS_KEY；前端通过 X-Access-Key 头带上（并存 localStorage）。
+const ACCESS_KEY = String(process.env.WZZ_ACCESS_KEY || '').trim();
+// 需要密钥的写操作路由（按 pathname 判定）
+const PROTECTED = new Set([
+  '/api/book', '/api/settle', '/api/use-card', '/api/cancel',
+  '/api/face', '/api/door', '/api/light', '/api/leave', '/api/checkin',
+  '/api/changeSeat', '/api/extend', '/api/token',
+]);
+function hasKey(req) {
+  if (!ACCESS_KEY) return true;                       // 没设密钥：本机直通
+  const hdr = String(req.headers['x-access-key'] || '');
+  if (hdr && hdr === ACCESS_KEY) return true;
+  const ck = String(req.headers['cookie'] || '');
+  const m = /(?:^|;\s*)wzz_key=([^;]+)/.exec(ck);
+  return !!m && decodeURIComponent(m[1]) === ACCESS_KEY;
 }
 
 // ======================= 上游 API 代理 =======================
@@ -232,7 +282,9 @@ function normalizeStore(row) {
   const addr = dedupeAddr(row.storeAreaAll || row.storeAreaTotal || row.storeAreaName || '');
   return {
     storeId: String(row.storeId ?? row.id),
-    storeName: row.storeName,
+    // 门店名去掉首尾空白：平台有「 知之书房·翠苑·社区自习室」这种带前导空格的名字，
+    // 原样透出会在列表里看起来像多了一条，且排序会跑到最前。
+    storeName: String(row.storeName ?? '').trim(),
     city: cityOf(addr),
     addr,
     bizTime: row.storeBusinessTime || '',
@@ -241,22 +293,33 @@ function normalizeStore(row) {
 
 function loadSeedStores() {
   try {
-    const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'zero_stores_seed.json'), 'utf8'));
+    const seed = ZERO_SEED;   // 内嵌种子，云端/本机一致
     return { map: new Map(seed.stores.map(r => [String(r.storeId), normalizeStore(r)])), total: seed.stores.length };
   } catch { return { map: new Map(), total: 0 }; }
 }
 
 // 分页拉全（免得某张卡覆盖超过单页上限时漏店）
 async function fetchAllZeroStores() {
-  const pageSize = 200;
+  // 平台分页不可靠：pageSize 小的时候 pageNo=2 会重复返回第一页，
+  // 顺着 pageCount 翻会得到重复数据、后面真正的门店被漏掉。
+  // 实测 pageSize 1000 一次就能把 225 家全给回来（pageCount=1），所以直接要一个大页，
+  // 万一哪天超过 1000 家，再按 total 判断是否需要继续翻页。
+  const pageSize = 1000;
   const all = [];
+  const seen = new Set();
   for (let pageNo = 1; pageNo <= 20; pageNo++) {
     const r = await api('/card/available-stores', { userCardId: CONFIG.zeroCardId, cityId: '', pageNo, pageSize });
     const rows = r?.data?.rows || [];
-    all.push(...rows);
+    let fresh = 0;
+    for (const row of rows) {
+      const id = String(row.storeId ?? row.id);
+      if (seen.has(id)) continue;        // 同一页重复返回时去重，避免提前收工
+      seen.add(id); all.push(row); fresh++;
+    }
     const total = Number(r?.data?.total ?? 0);
-    const pageCount = Number(r?.data?.pageCount ?? 1);
-    if (!rows.length || all.length >= total || pageNo >= pageCount) break;
+    // 收工条件：没数据 / 没有新数据 / 已拿满 total
+    if (!rows.length || !fresh) break;
+    if (total && all.length >= total) break;
   }
   return all;
 }
@@ -1482,7 +1545,15 @@ const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.png': 'image/png', '.ico': 'image/x-icon', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml',
 };
+function sendHtml(res, html) {
+  const buf = Buffer.from(html, 'utf8');
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(buf);
+}
+
 function serveFile(res, file) {
+  // ui.html 优先用内嵌字符串，云端/本机都能服务，不用读盘
+  if (file === 'ui.html') return sendHtml(res, UI_HTML);
   fs.readFile(path.join(__dirname, file), (err, buf) => {
     if (err) return send(res, { ok: false, msg: file + ' 缺失：' + err.message }, 500);
     const ext = path.extname(file).toLowerCase();
@@ -1495,48 +1566,76 @@ function serveFile(res, file) {
 }
 
 // ======================= 启动 =======================
-const server = http.createServer(async (req, res) => {
+// ======================= 请求分发（本机 / Vercel serverless 共用） =======================
+export async function requestHandler(req, res) {
   try {
-    const u = new URL(req.url, `http://${CONFIG.host}:${CONFIG.port}`);
-    if (u.pathname === '/' || u.pathname === '/index.html') return serveFile(res, 'ui.html');
+    const host = req.headers.host || `${CONFIG.host}:${CONFIG.port}`;
+    const u = new URL(req.url, `http://${host}`);
+
     // favicon：用平台自己的小程序 logo（/fp/photo/org/getAppletMessage 里那条 小程序logo.png）
     if (u.pathname === '/favicon.ico' || u.pathname === '/favicon.png') return serveFile(res, 'favicon.png');
     if (u.pathname === '/apple-touch-icon.png') return serveFile(res, 'apple-touch-icon.png');
+
+    // 页面路由：'/' 与 '/app' 都直接返回应用（任何人都能打开、浏览门店）。
+    if (u.pathname === '/' || u.pathname === '/index.html' || u.pathname === '/app' || u.pathname === '/gate') {
+      return serveFile(res, 'ui.html');
+    }
+
     const m = routes.find(rt => rt.method === req.method && rt.pattern === u.pathname);
     if (!m) return send(res, { ok: false, msg: '不存在：' + u.pathname }, 404);
+
+    // 写操作门：受保护路由要求登录密钥（X-Access-Key 头或 wzz_key cookie）。
+    // 读接口（门店/座位/订单/状态…）全部开放，不用登录。
+    if (ACCESS_KEY && PROTECTED.has(u.pathname) && !hasKey(req)) {
+      return send(res, { ok: false, needLogin: true, msg: '请先在「我的」里登录' }, 401);
+    }
+
     const query = Object.fromEntries(u.searchParams);
     const body = req.method === 'POST' ? await readBody(req) : null;
     return await m.handler(query, body, res);
   } catch (e) {
     return send(res, { ok: false, msg: '服务端错误：' + e.message }, 500);
   }
-});
-server.keepAliveTimeout = 65000;
+}
 
-server.listen(CONFIG.port, CONFIG.host, async () => {
-  const a = loadAuth(true);
-  const t = decodeToken(a.token);
-  console.log('');
-  console.log('  ◆ 王知之自习室 · 本地选座下单助手');
-  console.log(`  → 本机   http://127.0.0.1:${CONFIG.port}`);
-  if (CONFIG.host === '0.0.0.0') {
-    const ips = lanIPv4();
-    if (ips.length) for (const i of ips) console.log(`  → 局域网 http://${i.address}:${CONFIG.port}   (${i.name})`);
-    else console.log('  ⚠ 没找到局域网 IPv4 地址（检查 WiFi 是否连上）');
-    console.log('  ⚠ 已开放到局域网：同一网络下任何设备都能操作这个账号。看完请去掉 --lan。');
-  }
-  console.log(`  → token 来源：${a.source || 'auth.json'}`);
-  if (t) console.log(`  → token 有效期至 ${new Date(t.exp * 1000).toLocaleString('zh-CN', { hour12: false })}（剩 ${Math.floor((t.exp * 1000 - Date.now()) / 86400000)} 天）`);
-  else console.log('  ⚠ token 解析失败，请检查 auth.json');
-  try {
-    const probe = await api('/fp/store/org/store-count', null, 'GET', null, 12000, 1);
-    if (probe?.success === true || probe?.code === 200) console.log('  → token 探活：正常');
-    else console.log(`  ⚠ token 探活失败：${probe?.msg || probe?.code || '未知'} —— 若你在微信里重新登录过，旧 token 会被顶掉；网页「我的 → 更新 token」一键换。`);
-  } catch { }
-  console.log('  → 只订 0 元店；开门 / 提前入座 / 退座 / 取消预约 都在订单详情页直接做');
-  try {
-    const z = await getZeroStores();
-    console.log(`  → 月卡 0 元覆盖：${z.total} 家${z.stale ? `（种子兜底，实时拉取失败：${z.failMsg || ''}）` : ''}`);
-  } catch { }
-  console.log('');
-});
+// 本机模式才启动长驻 HTTP 服务。被作为模块 import（Vercel serverless）时不 listen。
+export function startLocal() {
+  const server = http.createServer(requestHandler);
+  server.keepAliveTimeout = 65000;
+
+  server.listen(CONFIG.port, CONFIG.host, async () => {
+    const a = loadAuth(true);
+    const t = decodeToken(a.token);
+    console.log('');
+    console.log('  ◆ 王知之自习室 · 本地选座下单助手');
+    console.log(`  → 本机   http://127.0.0.1:${CONFIG.port}`);
+    if (CONFIG.host === '0.0.0.0') {
+      const ips = lanIPv4();
+      if (ips.length) for (const i of ips) console.log(`  → 局域网 http://${i.address}:${CONFIG.port}   (${i.name})`);
+      else console.log('  ⚠ 没找到局域网 IPv4 地址（检查 WiFi 是否连上）');
+      console.log('  ⚠ 已开放到局域网：同一网络下任何设备都能操作这个账号。看完请去掉 --lan。');
+    }
+    console.log(`  → token 来源：${a.source || 'auth.json'}`);
+    if (ACCESS_KEY) console.log('  → 登录密钥：已开启（仅下单/开门等写操作需要；浏览门店无需登录）');
+    if (t) console.log(`  → token 有效期至 ${new Date(t.exp * 1000).toLocaleString('zh-CN', { hour12: false })}（剩 ${Math.floor((t.exp * 1000 - Date.now()) / 86400000)} 天）`);
+    else console.log('  ⚠ token 解析失败，请检查 auth.json / WZZ_TOKEN');
+    try {
+      const probe = await api('/fp/store/org/store-count', null, 'GET', null, 12000, 1);
+      if (probe?.success === true || probe?.code === 200) console.log('  → token 探活：正常');
+      else console.log(`  ⚠ token 探活失败：${probe?.msg || probe?.code || '未知'} —— 若你在微信里重新登录过，旧 token 会被顶掉；网页「我的 → 更新 token」一键换。`);
+    } catch { }
+    console.log('  → 只订 0 元店；开门 / 提前入座 / 退座 / 取消预约 都在订单详情页直接做');
+    try {
+      const z = await getZeroStores();
+      console.log(`  → 月卡 0 元覆盖：${z.total} 家${z.stale ? `（种子兜底，实时拉取失败：${z.failMsg || ''}）` : ''}`);
+    } catch { }
+    console.log('');
+  });
+  return server;
+}
+
+// 直接执行（node book.mjs / npm start）时启动本机服务；
+// 被 import（Vercel serverless）时不 listen，由 api/index.js 复用 requestHandler。
+if (process.argv[1] && process.argv[1].endsWith('book.mjs')) {
+  startLocal();
+}

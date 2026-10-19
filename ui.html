@@ -561,7 +561,7 @@ img{display:block}
   <div class="viewport" id="viewport"></div>
 
   <!-- tabBar -->
-  <div class="tabbar" id="tabbar">
+  <div class="tabbar" id="tabbar" data-tabbar>
     <button data-tab="orders" class="on">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8.5 8.5h7M8.5 12.5h7M8.5 16.5h4"/></svg>
       <span>订单</span>
@@ -738,54 +738,103 @@ function confirmDialog({ title, body, ok = '确定', cancel = '取消', danger =
   });
 }
 
-/* ---------------- 访问密钥 ---------------- */
-/* 页面加载后先要求输入访问密钥，通过后存在 localStorage；
-   之后每次 API 请求都带上 X-Access-Key 头，服务端校验不过就 401。 */
+/* ---------------- 登录密钥（仅写操作需要） ---------------- */
+/* 门店 / 座位 / 订单 这些「看」的部分完全开放，不需要登录。
+   只有真正会动账号的操作（下单、开门、签到、退座、取消、换座、延长）才要密钥。
+   密钥存在 localStorage，每次请求都带 X-Access-Key 头；服务端只在写接口上校验。 */
 const KEY_STORE = 'wzz.accessKey';
 function getAccessKey() { try { return localStorage.getItem(KEY_STORE) || ''; } catch { return ''; } }
 function setAccessKey(k) { try { k ? localStorage.setItem(KEY_STORE, k) : localStorage.removeItem(KEY_STORE); } catch { } }
+function hasAccessKey() { return !!getAccessKey(); }
 
-function gateHtml() {
-  return `
-  <div class="page-inner" style="max-width:360px;margin:80px auto;text-align:center;">
-    <div style="font-size:44px;margin-bottom:12px;">🔐</div>
-    <h2 style="margin:0 0 6px;font-size:19px;">访问密钥</h2>
-    <p style="color:#888;font-size:13.5px;margin:0 0 20px;">这个部署是私人的 —— 输入密钥才能继续。</p>
-    <input id="gate-key" type="password" placeholder="访问密钥" autocomplete="off"
-      style="width:100%;padding:12px 14px;font-size:15px;border:1px solid #ddd;border-radius:10px;outline:none;text-align:center;letter-spacing:2px;" />
-    <div id="gate-err" style="color:#e5484d;font-size:12.5px;min-height:18px;margin-top:8px;"></div>
-    <button id="gate-go" style="width:100%;padding:12px;margin-top:8px;background:var(--brand,#0052D9);color:#fff;border:0;border-radius:10px;font-size:15px;font-weight:500;">进入</button>
-  </div>`;
+/* 项目原生风格的「登录」弹窗 —— 复用 .dialog / .dtitle / .inp / .dfoot。
+   只在下单 / 开门 / 退座这类真实操作被点下时弹出，浏览门店永远不弹。
+   返回 Promise<boolean>：true=已登录，false=用户取消。 */
+let keyAsking = null;                       // 同一时刻只允许一个登录框
+function askKey(reason) {
+  if (keyAsking) return keyAsking;
+  keyAsking = new Promise(resolve => {
+    const d = $('#dialog');
+    d.innerHTML = `
+      <div class="dtitle">登录后继续</div>
+      <div class="dbody" style="padding-top:2px">
+        <div style="margin:0 0 14px;color:var(--ink-2);font-size:14px;line-height:1.6;text-align:left">${esc(reason || '这个操作会动到你的账号')}</div>
+        <label class="inp" style="display:block;text-align:left">
+          <label style="display:block;font-size:11px;color:var(--ink-3);margin-bottom:1px">访问密钥</label>
+          <input id="key-in" type="password" inputmode="text" autocomplete="off" placeholder="输入部署时设的密钥">
+        </label>
+        <div id="key-err" style="color:var(--price);font-size:13px;min-height:20px;margin-top:10px"></div>
+      </div>
+      <div class="dfoot">
+        <button data-x="0">取消</button>
+        <button data-x="1" class="ok">登录</button>
+      </div>`;
+    d.classList.add('on');
+    let done = false;
+    const finish = v => {
+      if (done) return; done = true;
+      keyAsking = null;                 // 允许下一次操作重新弹
+      closeDialog(); resolve(v);
+    };
+    const inp = d.querySelector('#key-in');
+    const err = d.querySelector('#key-err');
+    const btnOk = d.querySelector('[data-x="1"]');
+    d.querySelector('[data-x="0"]').onclick = () => finish(false);
+    btnOk.onclick = async () => {
+      const k = (inp.value || '').trim();
+      if (!k) { err.textContent = '请输入密钥'; return; }
+      btnOk.disabled = true; btnOk.textContent = '校验中…';
+      // 用一次写接口探活真实校验（/api/token 的 GET 不通，用 /api/book 空 body 会报参数错，
+      // 所以直接打 /api/checkin 带错 orderId：密钥对 → 不是 401；密钥错 → 401）。
+      let ok = false;
+      try {
+        const r = await fetch('/api/checkin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Access-Key': k },
+          body: JSON.stringify({}),
+        });
+        ok = r.status !== 401;
+      } catch (e) { ok = false; }
+      if (ok) {
+        setAccessKey(k);
+        finish(true);
+      } else {
+        btnOk.disabled = false; btnOk.textContent = '登录';
+        err.textContent = '密钥不对，再试一次';
+        inp.select();
+      }
+    };
+    inp.onkeydown = e => { if (e.key === 'Enter') btnOk.click(); };
+    setTimeout(() => inp.focus(), 60);
+  });
 }
 
-function mountGate(onOk) {
-  const root = document.querySelector('.page-view') || document.body;
-  const prev = root.innerHTML;
-  root.innerHTML = gateHtml();
-  const inp = root.querySelector('#gate-key');
-  const err = root.querySelector('#gate-err');
-  const go = () => {
-    const k = (inp.value || '').trim();
-    if (!k) { err.textContent = '请输入密钥'; return; }
-    setAccessKey(k);
-    root.innerHTML = prev;
-    onOk && onOk();
-  };
-  root.querySelector('#gate-go').onclick = go;
-  inp.onkeydown = e => { if (e.key === 'Enter') go(); };
-  inp.focus();
+/* 写操作统一入口：没密钥就先弹窗登录，登录了再发请求。 */
+async function jpostAuth(url, body, reason) {
+  if (!hasAccessKey()) {
+    const ok = await askKey(reason);
+    if (!ok) return { ok: false, cancelled: true };
+  }
+  const r = await jpost(url, body);
+  if (r && r.needLogin) {              // 服务端说没登录（比如密钥被改过）→ 清掉重弹
+    setAccessKey('');
+    const ok = await askKey(reason);
+    if (!ok) return { ok: false, cancelled: true };
+    return await jpost(url, body);
+  }
+  return r;
 }
 
 async function jget(url) {
   const r = await fetch(url, { headers: { 'X-Access-Key': getAccessKey() } });
-  if (r.status === 401) { throw Object.assign(new Error('需要密钥'), { needKey: true }); }
   const j = await r.json().catch(() => ({ ok: false, msg: '返回不是 JSON（HTTP ' + r.status + '）' }));
+  if (r.status === 401 && j.needLogin) j.needLogin = true;
   return j;
 }
 async function jpost(url, body) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Access-Key': getAccessKey() }, body: JSON.stringify(body) });
-  if (r.status === 401) { throw Object.assign(new Error('需要密钥'), { needKey: true }); }
   const j = await r.json().catch(() => ({ ok: false, msg: '返回不是 JSON（HTTP ' + r.status + '）' }));
+  if (r.status === 401) j.needLogin = true;
   return j;
 }
 
@@ -1703,7 +1752,7 @@ AFTER.order = (el) => {
         body: `换到「<b>${esc(c.dataset.sname)} ${esc(c.dataset.name)} 号</b>」？<br><br>会释放现在的座位并占用新座位。`,
         ok: '换座', danger: true })) return;
       closeSheet();
-      const d = await jpost('/api/changeSeat', { orderId: o.orderId, seatId: c.dataset.seat, spaceId: c.dataset.space, storeId: o.storeId, confirm: true });
+      const d = await jpostAuth('/api/changeSeat', { orderId: o.orderId, seatId: c.dataset.seat, spaceId: c.dataset.space, storeId: o.storeId, confirm: true }, '换座会改动你的订单，需要先登录。');
       await refresh(d.ok ? 'green' : 'red',
         `<b>换座</b>：${esc(d.msg || '')}<br><span class="subtle">座位 ${esc(d.before?.seatName || '?')} → ${esc(d.after?.seatName || '?')}（座位号以回读服务端为准）</span>`);
     });
@@ -1724,7 +1773,7 @@ AFTER.order = (el) => {
       ok: '试一次', danger: true,
     })) return;
     const done = busy(ext, '延长中…');
-    const d = await jpost('/api/extend', { orderId: o.orderId, confirm: true });
+    const d = await jpostAuth('/api/extend', { orderId: o.orderId, confirm: true }, '延长时长会改动你的订单，需要先登录。');
     done();
     await refresh(d.ok ? 'green' : 'red',
       `<b>延长</b>：${esc(d.msg || '')}<br><span class="subtle">结束时间 ${esc(hhmm(d.before?.end))} → ${esc(hhmm(d.after?.end))}`
@@ -1739,7 +1788,7 @@ AFTER.order = (el) => {
       ok: '提前入座', danger: true,
     })) return;
     const done = busy(checkin, '入座中…');
-    const r = await jpost('/api/checkin', { orderId: o.orderId, confirm: true });
+    const r = await jpostAuth('/api/checkin', { orderId: o.orderId, confirm: true }, '签到入座会动到你的订单，需要先登录。');
     done();
     await refresh(r.ok ? 'green' : 'red',
       `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
@@ -1753,7 +1802,7 @@ AFTER.order = (el) => {
       ok: '开门', danger: true,
     })) return;
     const done = busy(door, '开门中…');
-    const r = await jpost('/api/door', { orderId: o.orderId, confirm: true });
+    const r = await jpostAuth('/api/door', { orderId: o.orderId, confirm: true }, '开门会控制门店设备，需要先登录。');
     done();
     await refresh(r.ok ? 'green' : 'red',
       `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}
@@ -1768,7 +1817,7 @@ AFTER.order = (el) => {
     })) return;
     if (!await confirmDialog({ title: '再确认一次', body: '退座没法撤销，确定吗？', ok: '确认退座', danger: true })) return;
     const done = busy(leave, '退座中…');
-    const r = await jpost('/api/leave', { orderId: o.orderId, confirm: true });
+    const r = await jpostAuth('/api/leave', { orderId: o.orderId, confirm: true }, '退座会结束你当前的学习，需要先登录。');
     done();
     await refresh(r.ok ? 'green' : 'red', `${r.ok ? '✅' : '❌'} ${esc(r.msg || '')}`);
   };
@@ -1784,7 +1833,7 @@ AFTER.order = (el) => {
       ok: '取消预约', danger: true,
     })) return;
     const done = busy(cancel, '取消中…');
-    const r = await jpost('/api/cancel', { orderId: o.orderId, confirm: true });
+    const r = await jpostAuth('/api/cancel', { orderId: o.orderId, confirm: true }, '取消预约会释放你的座位，需要先登录。');
     done();
     const lead = r.leadMin == null ? '' : ` · 离开车 ${r.leadMin} 分钟`;
     await refresh(r.ok ? 'green' : 'red',
@@ -1848,7 +1897,7 @@ async function confirmOrder(el) {
 async function doBook(sel) {
   const btn = $('#sh-ok');
   btn.disabled = true; btn.textContent = '下单中…';
-  const r = await jpost('/api/book', {
+  const r = await jpostAuth('/api/book', {
     storeId: state.store.storeId, spaceId: sel.spaceId, seatId: sel.seatId,
     date: state.date, start: state.start, end: state.end,
   });
@@ -1901,7 +1950,7 @@ async function doSettle(orderId, payYuan) {
   if (!ok) return;
   const btn = $('#sh-settle');
   if (btn) { btn.disabled = true; btn.textContent = '抵扣中…'; }
-  const r = await jpost('/api/settle', { orderId });
+  const r = await jpostAuth('/api/settle', { orderId }, '下单要用你的月卡抵扣，需要先登录。');
   if (r.ok) {
     closeSheet();
     toast('抵扣成功 · 实付 ¥0');
@@ -2155,7 +2204,7 @@ AFTER.me = (el) => {
       const out = el.querySelector('#face-out');
       out.innerHTML = '<div class="notice blue">正在上传（先传 OSS，再建档）…</div>';
       let r;
-      try { r = await jpost('/api/face', { dataUrl, confirm: true }); }
+      try { r = await jpostAuth('/api/face', { dataUrl, confirm: true }, '上传人脸会写入你的账号，需要先登录。'); }
       catch (e2) { r = { ok: false, msg: e2.message }; }
       if (!el.isConnected) return;
       out.innerHTML = `<div class="notice ${r.ok ? 'green' : 'red'}">
@@ -2210,7 +2259,7 @@ async function scanHars(el) {
 async function saveToken(el, body) {
   const out = el.querySelector('#tok-result');
   out.innerHTML = '<div class="notice blue">正在校验并保存…</div>';
-  const r = await jpost('/api/token', body);
+  const r = await jpostAuth('/api/token', body, '更新 token 会改动登录凭证，需要先登录。');
   if (!el.isConnected) return;
   out.innerHTML = `<div class="notice ${r.ok ? (r.alive ? 'green' : 'red') : 'red'}">
     ${r.ok ? (r.alive ? '✅ ' : '⚠ ') : '❌ '}${esc(r.msg || '')}
@@ -2231,29 +2280,29 @@ function paintTabBadge(s) {
 }
 
 /* ---------------- 启动 ---------------- */
-(async function init() {
-  // 状态栏时间
+/* 免登录浏览：启动直接进首页看订单/门店，不拦、不弹。
+   需要动账号的操作（下单/开门/…）会在点击那一刻弹「登录」框。 */
+async function boot() {
   const tick = () => {
     const d = new Date();
     $('#sb-time').textContent = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
   tick(); setInterval(tick, 20000);
-
-  // 顶部安全区：给 viewport 上的页面留出底部空间
   resetTimes();
-  go('orders');
 
-  const st = await jget('/api/status');
+  go('orders');
+  const st = await jget('/api/status').catch(() => ({}));
   if (st.ok) {
     state.status = st;
     if (!st.tokenAlive) {
       setTimeout(() => toast(st.probeMsg ? 'token 失效：' + st.probeMsg : 'token 失效，去「我的 → 更新 token」', 'wide'), 700);
     }
   } else {
-    setTimeout(() => toast('连不上本机服务，确认 node book.mjs 在跑', 'wide'), 500);
+    setTimeout(() => toast('连不上服务，确认部署在运行', 'wide'), 500);
   }
-  loadOrders();   // 预热 tabBar 红点
-})();
+  loadOrders();
+}
+boot();
 </script>
 </body>
 </html>
