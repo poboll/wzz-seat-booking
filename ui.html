@@ -738,13 +738,53 @@ function confirmDialog({ title, body, ok = '确定', cancel = '取消', danger =
   });
 }
 
+/* ---------------- 访问密钥 ---------------- */
+/* 页面加载后先要求输入访问密钥，通过后存在 localStorage；
+   之后每次 API 请求都带上 X-Access-Key 头，服务端校验不过就 401。 */
+const KEY_STORE = 'wzz.accessKey';
+function getAccessKey() { try { return localStorage.getItem(KEY_STORE) || ''; } catch { return ''; } }
+function setAccessKey(k) { try { k ? localStorage.setItem(KEY_STORE, k) : localStorage.removeItem(KEY_STORE); } catch { } }
+
+function gateHtml() {
+  return `
+  <div class="page-inner" style="max-width:360px;margin:80px auto;text-align:center;">
+    <div style="font-size:44px;margin-bottom:12px;">🔐</div>
+    <h2 style="margin:0 0 6px;font-size:19px;">访问密钥</h2>
+    <p style="color:#888;font-size:13.5px;margin:0 0 20px;">这个部署是私人的 —— 输入密钥才能继续。</p>
+    <input id="gate-key" type="password" placeholder="访问密钥" autocomplete="off"
+      style="width:100%;padding:12px 14px;font-size:15px;border:1px solid #ddd;border-radius:10px;outline:none;text-align:center;letter-spacing:2px;" />
+    <div id="gate-err" style="color:#e5484d;font-size:12.5px;min-height:18px;margin-top:8px;"></div>
+    <button id="gate-go" style="width:100%;padding:12px;margin-top:8px;background:var(--brand,#0052D9);color:#fff;border:0;border-radius:10px;font-size:15px;font-weight:500;">进入</button>
+  </div>`;
+}
+
+function mountGate(onOk) {
+  const root = document.querySelector('.page-view') || document.body;
+  const prev = root.innerHTML;
+  root.innerHTML = gateHtml();
+  const inp = root.querySelector('#gate-key');
+  const err = root.querySelector('#gate-err');
+  const go = () => {
+    const k = (inp.value || '').trim();
+    if (!k) { err.textContent = '请输入密钥'; return; }
+    setAccessKey(k);
+    root.innerHTML = prev;
+    onOk && onOk();
+  };
+  root.querySelector('#gate-go').onclick = go;
+  inp.onkeydown = e => { if (e.key === 'Enter') go(); };
+  inp.focus();
+}
+
 async function jget(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { headers: { 'X-Access-Key': getAccessKey() } });
+  if (r.status === 401) { throw Object.assign(new Error('需要密钥'), { needKey: true }); }
   const j = await r.json().catch(() => ({ ok: false, msg: '返回不是 JSON（HTTP ' + r.status + '）' }));
   return j;
 }
 async function jpost(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Access-Key': getAccessKey() }, body: JSON.stringify(body) });
+  if (r.status === 401) { throw Object.assign(new Error('需要密钥'), { needKey: true }); }
   const j = await r.json().catch(() => ({ ok: false, msg: '返回不是 JSON（HTTP ' + r.status + '）' }));
   return j;
 }
