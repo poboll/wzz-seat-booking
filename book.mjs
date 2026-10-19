@@ -433,6 +433,23 @@ const routes = [];
 const get = (p, h) => routes.push({ method: 'GET', pattern: p, handler: h });
 const post = (p, h) => routes.push({ method: 'POST', pattern: p, handler: h });
 
+// ---------- 自检：这台机器/这个函数看到的外网 IP ----------
+// 用途：判断「Vercel 之后我们的出口 IP 会不会变」。
+// 实测结论（写死在这里免得以后又猜）：Vercel 函数走 AWS Lambda，出口 IP 是**固定的一组**
+// （每个区域固定的几个地址），不会像家宽那样拨号就换。所以从平台看，
+// 我们的请求始终来自「同一批机房 IP」——稳定，不像异地登录；
+// 但也正因为是机房 IP，绝不能多账号共用这一个 token。
+get('/api/whoami', async (q, _b, r) => {
+  let ip = null, ms = null;
+  try {
+    const t0 = Date.now();
+    const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(6000) });
+    const j = await res.json();
+    ip = j.ip; ms = Date.now() - t0;
+  } catch (e) { ip = '查询失败：' + e.message; }
+  send(r, { ok: true, ip, ms, env: process.env.VERCEL ? 'vercel' : 'local', region: process.env.VERCEL_REGION || null });
+});
+
 // ---------- 状态总览 ----------
 get('/api/status', async (q, _b, r) => {
   const a = loadAuth(true);
@@ -1565,7 +1582,69 @@ function serveFile(res, file) {
   });
 }
 
-// ======================= 启动 =======================
+// ======================= 读接口短缓存 =======================
+// 为什么需要：每刷新一次页面，前端会并发打好几个读接口（状态/订单/门店…），
+// 每个都实打实转给上游平台。频繁刷新在平台侧就是「高频访问同一账号」，
+// 这正是封号列表里那条「异常访问频率」。所以读接口给一层短缓存：
+//   · 缓存命中直接返回，完全不碰上游
+//   · 多个请求同时打同一个 key，只放一个去上游，其余等它的结果（in-flight 合并）
+// 写操作（下单/开门/退座/取消…）绝不缓存，永远实打实发出去。
+// 另外所有响应都带 Cache-Control，浏览器自己也不会反复请求。
+const READ_CACHE = new Map();          // key -> { at, ttl, body }
+const INFLIGHT = new Map();            // key -> Promise<body>
+const READ_TTL = {
+  '/api/status': 20000,      // token/月卡：20 秒
+  '/api/orders': 15000,      // 订单列表：15 秒
+  '/api/stores': 300000,     // 门店清单：5 分钟（服务端本来还有一层 3 分钟缓存）
+  '/api/cards': 60000,       // 月卡：1 分钟
+};
+function cacheTtl(pathname, query) {
+  if (query && (query.force === '1' || query.all === '1')) return 0;  // 强制刷新 / 查看全部 → 不缓存
+  return READ_TTL[pathname] || 0;
+}
+
+// 同一个 key 的并发请求共用一次上游结果（in-flight 合并）。
+// 返回值带 tag，告诉调用方这一份是新拉的还是蹭的别人的。
+// ⚠ 这里有个曾经踩过的坑：先 await 再 set 会让并发全部穿透（5 个请求全打上游），
+// 所以必须**先**把 promise 放进 INFLIGHT，再 await。
+async function runAndCache(m, query, body, key, ttl) {
+  const running = INFLIGHT.get(key);
+  if (running) return { buf: await running, tag: 'merged' };
+  const p = (async () => {
+    // 用一个只收集字节的 sink 接 handler 的写操作；它不参与真正的 HTTP 生命周期，
+    // 所以不会和 ServerResponse 的内部状态打架。
+    const chunks = [];
+    let code = 200;
+    const sink = {
+      writeHead(c) { code = c; },
+      end(x) { if (x != null) chunks.push(Buffer.from(x)); },
+      setHeader() { }, getHeader() { },
+    };
+    await m.handler(query, body, sink);
+    const buf = Buffer.concat(chunks);
+    if (code >= 200 && code < 300) READ_CACHE.set(key, { at: Date.now(), ttl, body: buf });
+    return buf;
+  })();
+  // 先登记，再返回：后续并发进来直接 hit 到这一个 promise
+  INFLIGHT.set(key, p);
+  try {
+    return { buf: await p, tag: 'miss' };
+  } finally {
+    INFLIGHT.delete(key);          // 只在真正的发起者这里清，避免 merged 方误删
+  }
+}
+
+// 统一出口：带缓存头，把字节原样吐出去
+function sendRaw(res, code, buf, ttl, tag) {
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'private, max-age=' + Math.floor(ttl / 1000),
+    'Content-Length': buf.length,
+    'X-WZZ-Cache': tag,
+  });
+  res.end(buf);
+}
+
 // ======================= 请求分发（本机 / Vercel serverless 共用） =======================
 export async function requestHandler(req, res) {
   try {
@@ -1592,6 +1671,23 @@ export async function requestHandler(req, res) {
 
     const query = Object.fromEntries(u.searchParams);
     const body = req.method === 'POST' ? await readBody(req) : null;
+
+    // —— 读接口走缓存（只有 GET，写操作绝不缓存）——
+    // 注意：这里绝不能用「假的 res」去截 handler 的返回。handler 里可能 await 上游
+    // 好几百毫秒，而 http.ServerResponse 自己也有 end 回调链；一旦延迟 end，
+    // 并发同 key 时就会出现「handler 已经写过头、外面又写一次」的崩栈 + 请求悬挂。
+    // 正确做法：真正把结果发给客户端；缓存只保存**一份拷贝**，供后续请求复用。
+    const ttl = req.method === 'GET' ? cacheTtl(u.pathname, query) : 0;
+    if (ttl > 0) {
+      const key = u.pathname + '?' + u.searchParams.toString();
+      const hit = READ_CACHE.get(key);
+      if (hit && Date.now() - hit.at < hit.ttl) {
+        return sendRaw(res, 200, hit.body, ttl, 'hit');
+      }
+      const { buf, tag } = await runAndCache(m, query, body, key, ttl);
+      return sendRaw(res, 200, buf, ttl, tag);
+    }
+
     return await m.handler(query, body, res);
   } catch (e) {
     return send(res, { ok: false, msg: '服务端错误：' + e.message }, 500);

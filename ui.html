@@ -363,6 +363,7 @@ img{display:block}
 .ohd .name{font-size:16px;font-weight:600;flex:1;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .obody{padding:0 var(--pad) 11px}
+.obody .ohint{font-size:12.5px;color:var(--brand);margin-top:3px;font-weight:500}
 .ofoot{
   display:flex;align-items:center;justify-content:space-between;gap:8px;
   padding:9px var(--pad);border-top:.5px solid var(--line);background:#FCFCFC;
@@ -649,10 +650,14 @@ function render(page, anim) {
   document.querySelectorAll('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === page));
   if (AFTER[page]) AFTER[page](el);
 }
-document.querySelectorAll('#tabbar button').forEach(b => b.onclick = () => {
-  // 「预订」页在没选门店时自己显示「去找 0 元店」入口 —— 不再强制跳走，
-  // 否则用户点「预订」却被弹到「门店」，看起来就像逻辑坏了。
-  go(b.dataset.tab);
+document.querySelectorAll('#tabbar button').forEach(b => b.onclick = async () => {
+  const tab = b.dataset.tab;
+  // 门店 / 预订（挑店挑座）不需要登录；订单和「我的」属于账号内容，先登录。
+  if (tab === 'orders' || tab === 'me') {
+    const why = tab === 'orders' ? '查看订单需要先登录。' : '「我的」里有你的月卡和凭证，需要先登录。';
+    if (!await requireLogin(why)) return;
+  }
+  go(tab);
 });
 $('#nav-back').onclick = back;
 
@@ -666,6 +671,36 @@ const hhmm = t => {
   const m = String(t || '').match(/(\d{1,2}):(\d{2})/);
   return m ? m[1].padStart(2, '0') + ':' + m[2] : '';
 };
+// Date → 'HH:mm'（本地时区），用于「几点起可以开门」这种提示
+const hhmm2 = d => {
+  if (!(d instanceof Date) || isNaN(d)) return '';
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+};
+/* 订单开始时刻 → Date。
+   坑：/api/order 给的是 date:'2026-10-20' + begin:'10:00' 两个字段，
+   并没有 beginTime / studyBeginTime。早期代码读后者得到 undefined → NaN，
+   导致「取消扣减窗口」和「提前开门窗口」全部算错（开门按钮永远不受限）。 */
+function orderBeginAt(o) {
+  if (!o) return null;
+  // 1) 有完整时间戳就直接用（历史列表/部分接口会带）
+  for (const k of ['beginTime', 'studyBeginTime', 'startTime', 'begin']) {
+    const raw = o[k];
+    if (raw && /\d{1,2}:\d{2}/.test(raw) && /\d{4}-\d{1,2}-\d{1,2}/.test(raw)) {
+      const t = new Date(String(raw).replace(' ', 'T'));
+      if (!isNaN(t)) return t;
+    }
+  }
+  // 2) 拆成 date + begin（订单详情页走这条）
+  const day = o.date || o.studyDate || o.day || '';
+  const begin = o.begin || o.studyBeginTime || '';
+  const dm = String(day).match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const bm = String(begin).match(/(\d{1,2}):(\d{2})/);
+  if (dm && bm) {
+    const t = new Date(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]), Number(bm[1]), Number(bm[2]), 0, 0);
+    if (!isNaN(t)) return t;
+  }
+  return null;
+}
 
 /* 订单状态中文：优先用服务端给的 statusInfo.label，兜底用本地表。
    以前卡片上直接印「orderStatus = 4」，用户看不懂，这里统一转译。 */
@@ -705,9 +740,12 @@ let toastTimer = null;
 function toast(text, kind = '') {
   const t = $('#toast');
   t.className = 'toast on' + (kind === 'wide' ? ' wide' : '');
-  t.innerHTML = (kind === 'wide' ? '' : `
-    <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="rgba(255,255,255,.22)"/><path d="M7 12.4l3.2 3.2L17 9" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`)
-    + '<div>' + esc(text) + '</div>';
+  // 只有「success」才画那个对勾；其余（包括纯提示/进行中）都不画图标。
+  // 以前不分青红皂白都画一个对勾，于是「正在回查…」旁边杵着一个大大的 ✓，很怪。
+  const icon = kind === 'success'
+    ? '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" fill="rgba(255,255,255,.22)"/><path d="M7 12.4l3.2 3.2L17 9" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    : '';
+  t.innerHTML = icon + '<div>' + esc(text) + '</div>';
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.classList.remove('on'); }, kind === 'wide' ? 2600 : 1800);
 }
@@ -750,8 +788,10 @@ function hasAccessKey() { return !!getAccessKey(); }
 /* 项目原生风格的「登录」弹窗 —— 复用 .dialog / .dtitle / .inp / .dfoot。
    只在下单 / 开门 / 退座这类真实操作被点下时弹出，浏览门店永远不弹。
    返回 Promise<boolean>：true=已登录，false=用户取消。 */
-let keyAsking = null;                       // 同一时刻只允许一个登录框
-function askKey(reason) {
+let keyAsking = null;                       // 当前正在显示的那个登录框（Promise）
+/* 判断"是否已登录"只认 localStorage 里的密钥；没登录就弹框，且在框关掉之前
+   绝不把请求发出去。同一时刻只有一个框，后来者排队等它的结果。 */
+function askKeyOnce(reason) {
   if (keyAsking) return keyAsking;
   keyAsking = new Promise(resolve => {
     const d = $('#dialog');
@@ -773,19 +813,15 @@ function askKey(reason) {
     let done = false;
     const finish = v => {
       if (done) return; done = true;
-      keyAsking = null;                 // 允许下一次操作重新弹
+      keyAsking = null;
       closeDialog(); resolve(v);
     };
-    const inp = d.querySelector('#key-in');
-    const err = d.querySelector('#key-err');
-    const btnOk = d.querySelector('[data-x="1"]');
+    const inp = d.querySelector('#key-in'), err = d.querySelector('#key-err'), btnOk = d.querySelector('[data-x="1"]');
     d.querySelector('[data-x="0"]').onclick = () => finish(false);
     btnOk.onclick = async () => {
       const k = (inp.value || '').trim();
-      if (!k) { err.textContent = '请输入密钥'; return; }
+      if (!k) { err.textContent = '请输入密钥'; inp.focus(); return; }
       btnOk.disabled = true; btnOk.textContent = '校验中…';
-      // 用一次写接口探活真实校验（/api/token 的 GET 不通，用 /api/book 空 body 会报参数错，
-      // 所以直接打 /api/checkin 带错 orderId：密钥对 → 不是 401；密钥错 → 401）。
       let ok = false;
       try {
         const r = await fetch('/api/checkin', {
@@ -795,35 +831,41 @@ function askKey(reason) {
         });
         ok = r.status !== 401;
       } catch (e) { ok = false; }
-      if (ok) {
-        setAccessKey(k);
-        finish(true);
-      } else {
+      if (ok) { setAccessKey(k); finish(true); }
+      else {
         btnOk.disabled = false; btnOk.textContent = '登录';
         err.textContent = '密钥不对，再试一次';
         inp.select();
       }
     };
-    inp.onkeydown = e => { if (e.key === 'Enter') btnOk.click(); };
+    inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); btnOk.click(); } };
     setTimeout(() => inp.focus(), 60);
   });
+  return keyAsking;
 }
 
 /* 写操作统一入口：没密钥就先弹窗登录，登录了再发请求。 */
 async function jpostAuth(url, body, reason) {
+  // 没登录 → 先弹框，登录成功后才发请求。没登录时一个字节都不发。
   if (!hasAccessKey()) {
-    const ok = await askKey(reason);
+    const ok = await askKeyOnce(reason);
     if (!ok) return { ok: false, cancelled: true };
   }
   const r = await jpost(url, body);
-  if (r && r.needLogin) {              // 服务端说没登录（比如密钥被改过）→ 清掉重弹
+  if (r && r.needLogin) {              // 服务端说没登录（密钥被改过）→ 清掉重弹，重发
     setAccessKey('');
-    const ok = await askKey(reason);
+    const ok = await askKeyOnce(reason);
     if (!ok) return { ok: false, cancelled: true };
     return await jpost(url, body);
   }
   return r;
 }
+/* 只做门禁、不发请求：给「先弹确认框再发请求」的按钮用，
+   保证登录框一定出现在确认框之前 —— 用户看到的第一个框就是登录框。 */
+jpostAuth.ensure = async function (reason) {
+  if (hasAccessKey()) return true;
+  return !!(await askKeyOnce(reason));
+};
 
 async function jget(url) {
   const r = await fetch(url, { headers: { 'X-Access-Key': getAccessKey() } });
@@ -853,7 +895,7 @@ PAGES.stores = () => `
     <div id="store-list">${skeletons()}</div>
     <div class="tip">
       只列出你月卡 <b>0 元覆盖</b>的门店。点进去看座位图，选中座位可以直接下单，用月卡抵扣后实付 <b>¥0</b>。<br>
-      下单后开门 / 开灯 / 退座都能在本工具里做（选座页有「当前状况」卡，预约详情页有操作按钮）。
+      下单后在「订单」详情页可以开门 / 提前入座 / 退座 / 取消（进门前 45 分钟才允许开门）。
     </div>
   </div>`;
 
@@ -983,12 +1025,18 @@ PAGES.order = () => {
   const rule = o.cancelRule || null;
   const need = Number((rule && rule.aheadCancelBookingMinutes) != null ? rule.aheadCancelBookingMinutes : 30);
   const deduct = Number((rule && rule.bookingAheadCloseDeductMinutes) != null ? rule.bookingAheadCloseDeductMinutes : 30);
-  let leadMin = null;                        // 离开车还有多少分钟
-  {
-    const bt = o.beginTime || o.studyBeginTime;
-    const t = bt ? new Date(String(bt).replace(' ', 'T')).getTime() : NaN;
-    if (!isNaN(t)) leadMin = Math.floor((t - Date.now()) / 60000);
-  }
+  // 订单详情返回的是 date(2026-10-20) + begin(10:00) 两个字段，
+  // 之前这里读 o.beginTime / o.studyBeginTime（都不存在）→ NaN → 扣减窗口永远算不出来。
+  const beginAt = orderBeginAt(o);           // Date 对象或 null
+  let leadMin = null;                        // 离开始还有多少分钟
+  if (beginAt) leadMin = Math.floor((beginAt.getTime() - Date.now()) / 60000);
+  // —— 开门时间窗（平台规则，自己先判，别等平台拒）——
+  // advanceOpeningTime = 门店允许提前多少分钟开门（实测 45）
+  // 只有「已支付(3)」且到了时间窗才允许开门；「使用中(6)」说明人已经在店里，可开。
+  const advMin = Number(o.advanceOpeningTime != null ? o.advanceOpeningTime : 45);
+  const openFrom = beginAt ? new Date(beginAt.getTime() - advMin * 60000) : null;
+  const withinOpenWindow = code === 6 ? true : (openFrom ? Date.now() >= openFrom.getTime() : false);
+  const openBlocked = live && hasDev && !withinOpenWindow;
   const inPenalty = leadMin != null && leadMin >= 0 && leadMin < need;
   const cancelWhy = code === 1 ? '待支付的单平台不让取消，等它自动失效'
     : code === 6 ? '已在用，请点「退座」' : code === 4 ? '这一单已经取消过了' : code === 8 ? '这一单已经结束' : '';
@@ -1010,25 +1058,29 @@ PAGES.order = () => {
         <div class="c-title">取消规则</div>
         <div class="c-desc">开始前 ${need} 分钟以上取消不扣减；${need} 分钟以内算违约，扣 ${deduct} 分钟</div>
         ${leadMin == null ? '' : inPenalty
-          ? `<div style="margin-top:6px"><span class="pill warn">离开车 ${leadMin} 分钟 · 已进扣减区间</span></div>`
-          : `<div style="margin-top:6px"><span class="pill ok">离开车 ${leadMin} 分钟 · 现在取消不扣减</span></div>`}
+          ? `<div style="margin-top:6px"><span class="pill warn">离开始 ${leadMin} 分钟 · 已进扣减区间</span></div>`
+          : `<div style="margin-top:6px"><span class="pill ok">离开始 ${leadMin} 分钟 · 现在取消不扣减</span></div>`}
       </div>
     </div>
 
     <div class="actions">
       <button class="btn" id="act-checkin" ${live ? '' : 'disabled'}>提前入座</button>
-      <button class="btn ghost" id="act-door" ${live && hasDev ? '' : 'disabled'}>开门</button>
+      <button class="btn ghost" id="act-door" ${live && hasDev && withinOpenWindow ? '' : 'disabled'}>开门</button>
       <button class="btn ghost" id="act-leave" ${live ? '' : 'disabled'}>退座</button>
       <button class="btn ghost" id="act-move" ${live ? '' : 'disabled'}>换座</button>
       <button class="btn ghost" id="act-extend" ${(live || code === 1) ? '' : 'disabled'}>延长时间</button>
       <button class="btn danger" id="act-cancel" ${canCancel ? '' : 'disabled'}>取消预约</button>
     </div>
+    ${hasAccessKey() ? '' : '<div class="tip" style="padding-top:10px">下面这些是真实操作，点下去会先让你登录。</div>'}
     <div id="act-out"></div>
     ${cancelWhy ? `<div class="tip" style="padding-top:10px">取消预约：${esc(cancelWhy)}</div>` : ''}
+    ${openBlocked ? `<div class="tip" style="padding-top:10px">开门：门店规定只能提前 ${esc(String(advMin))} 分钟开门，${esc(hhmm2(openFrom))} 之后才能点（到早了到店门口先找店长）。</div>` : ''}
 
     <div class="group">
       <div class="group-hd"><b>门店与设备</b></div>
-      ${o.advanceOpeningTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">可提前开门</div></div><div class="c-extra">${esc(String(o.advanceOpeningTime))} 分钟</div></div>` : ''}
+      ${o.advanceOpeningTime != null ? `<div class="cell"><div class="c-main"><div class="c-title">可提前开门</div>
+        <div class="c-desc">${openFrom ? '从 ' + esc(hhmm2(openFrom)) + ' 起可以下发开门指令' : '预约开始前 ' + esc(String(o.advanceOpeningTime)) + ' 分钟起'}</div></div>
+        <div class="c-extra"><span class="pill ${withinOpenWindow ? 'ok' : 'mute'}">${withinOpenWindow ? '已到时间' : '还差 ' + esc(String(Math.max(0, Math.ceil((openFrom.getTime() - Date.now()) / 60000)))) + ' 分钟'}</span></div></div>` : ''}
       ${hasDev ? `<div class="cell"><div class="c-main"><div class="c-title">门锁</div>
         <div class="c-desc mono">${esc(o.devices[0].deviceId || '—')} · ${esc(o.devices[0].manufacturerCode || '')}</div></div>
         <div class="c-extra"><span class="pill blue">${esc(o.devices[0].buttonName || '开门')}</span></div></div>`
@@ -1542,6 +1594,8 @@ function paintSticky(el) {
   el.querySelector('#st-v').innerHTML = `${durationMin()} 分钟（计费 ${billableMin(durationMin()) / 60} 小时）· 预估 <span class="money">${est == null ? '—' : '¥' + est.toFixed(2)}</span> → 月卡抵扣后 <span class="money">¥0</span>`;
   const go = el.querySelector('#st-go');
   go.disabled = false;
+  // 没登录时按钮文案直接说清楚要先登录 —— 免得点了才发现。样式不变，仍是主按钮。
+  go.textContent = hasAccessKey() ? '去下单' : '登录后下单';
   go.onclick = () => confirmOrder(el);
 }
 
@@ -1724,6 +1778,7 @@ AFTER.order = (el) => {
   // 所以成功与否**只看回读的座位号有没有变**，不信响应码。
   const move = el.querySelector('#act-move');
   if (move && !move.disabled) move.onclick = async () => {
+    if (!await jpostAuth.ensure('换座会改动你的订单，需要先登录。')) return;
     openSheet(`<div class="shd">换座 · 现在是 ${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</div>
       <div class="sbody" id="move-body"><div class="page-loading"><span class="spinner"></span> 正在拉这个时段的空座…</div></div>
       <div class="sfoot"><button class="btn ghost" id="move-cancel">取消</button></div>`);
@@ -1761,6 +1816,7 @@ AFTER.order = (el) => {
   // —— 延长时间 ——
   const ext = el.querySelector('#act-extend');
   if (ext && !ext.disabled) ext.onclick = async () => {
+    if (!await jpostAuth.ensure('延长时长会改动你的订单，需要先登录。')) return;
     const maxH = o.longestReservationTime ? Math.round(o.longestReservationTime / 60) : null;
     const advH = o.advanceContinueTime ? Math.round(o.advanceContinueTime / 60) : null;
     if (!await confirmDialog({
@@ -1781,6 +1837,7 @@ AFTER.order = (el) => {
   };
 
   if (checkin && !checkin.disabled) checkin.onclick = async () => {
+    if (!await jpostAuth.ensure('签到入座会动到你的订单，需要先登录。')) return;
     if (!await confirmDialog({
       title: '提前入座',
       body: `现在就算「入座」吗？<br><br>成功后这一单变成<b>使用中</b>，座位显示为占用中，灯会亮。<br><br>
@@ -1796,6 +1853,7 @@ AFTER.order = (el) => {
   };
 
   if (door && !door.disabled) door.onclick = async () => {
+    if (!await jpostAuth.ensure('开门会控制门店设备，需要先登录。')) return;
     if (!await confirmDialog({
       title: '开门',
       body: `给「${esc(o.storeName || '')}」的门锁下发开门指令？<br><br>门锁在线且到了可开门时间才会动作。`,
@@ -1810,6 +1868,7 @@ AFTER.order = (el) => {
   };
 
   if (leave && !leave.disabled) leave.onclick = async () => {
+    if (!await jpostAuth.ensure('退座会结束你当前的学习，需要先登录。')) return;
     if (!await confirmDialog({
       title: '退座',
       body: '提前结束这次学习？<br><br>座位会立刻释放，预约结束时间被截断成现在。<br><br>⚠ <b>已扣的月卡天数不退回</b>。',
@@ -1823,6 +1882,7 @@ AFTER.order = (el) => {
   };
 
   if (cancel && !cancel.disabled) cancel.onclick = async () => {
+    if (!await jpostAuth.ensure('取消预约会释放你的座位，需要先登录。')) return;
     const need = (state.cancelRule && state.cancelRule.aheadCancelBookingMinutes) || 30;
     const deduct = (state.cancelRule && state.cancelRule.bookingAheadCloseDeductMinutes) || 30;
     if (!await confirmDialog({
@@ -1835,7 +1895,7 @@ AFTER.order = (el) => {
     const done = busy(cancel, '取消中…');
     const r = await jpostAuth('/api/cancel', { orderId: o.orderId, confirm: true }, '取消预约会释放你的座位，需要先登录。');
     done();
-    const lead = r.leadMin == null ? '' : ` · 离开车 ${r.leadMin} 分钟`;
+    const lead = r.leadMin == null ? '' : ` · 离开始 ${r.leadMin} 分钟`;
     await refresh(r.ok ? 'green' : 'red',
       `${r.ok ? '✅' : '❌'} ${esc(r.msg || r.message || '')}
        <div class="mono" style="margin-top:6px;font-size:12px">code=${esc(String(r.code))} · orderStatus ${esc(String(r.before?.orderStatus))} → ${esc(String(r.after?.orderStatus))}${esc(lead)}${r.penaltyNote ? '<br>' + esc(r.penaltyNote) : ''}</div>`);
@@ -1867,6 +1927,9 @@ async function reloadSeats() {
 async function confirmOrder(el) {
   const sel = state.selected;
   if (!sel) return;
+  // 没登录就先把登录框弹出来：确认预约这一步就是要花钱的动作，
+  // 不能让人填完一整套时间才被告知要登录。
+  if (!(await jpostAuth.ensure('下单要用你的月卡抵扣，需要先登录。'))) return;
   const dur = durationMin(), est = estimate();
   const rule = state.cancelRule;
   openSheet(`
@@ -1886,7 +1949,7 @@ async function confirmOrder(el) {
       <div class="notice red" style="margin:10px 12px 16px">
         <b>取消不退天数</b>：实测抵扣前后卡内天数不变，取消只释放座位。
         ${rule ? `门店规则：开始前 ${rule.aheadCancelBookingMinutes ?? 30} 分钟以上取消不扣费。` : ''}
-        下单后可以在「预约」详情页开门 / 开灯 / 退座；退座会立刻结束学习、释放座位，但这 1 天也不会退回。
+        下单后可以在「预约」详情页开门 / 提前入座 / 退座；退座会立刻结束学习、释放座位，但这 1 天也不会退回。
       </div>
     </div>
     <div class="sfoot"><button class="btn block" id="sh-ok">确认下单</button></div>`);
@@ -1953,7 +2016,7 @@ async function doSettle(orderId, payYuan) {
   const r = await jpostAuth('/api/settle', { orderId }, '下单要用你的月卡抵扣，需要先登录。');
   if (r.ok) {
     closeSheet();
-    toast('抵扣成功 · 实付 ¥0');
+    toast('已用月卡抵扣 · 实付 ¥0', 'success');
     loadOrders(true);
     setTimeout(() => go('orders'), 400);
   } else {
@@ -2022,6 +2085,7 @@ function paintHistory(el) {
 
 /* —— 按订单号查单：查那些已经不在「当前预约」里的单 —— */
 async function lookupOrder(el) {
+  if (!await requireLogin('查看订单需要先登录。')) return;
   const orderId = (el.querySelector('#oid')?.value || '').trim();
   if (!orderId) { toast('先填订单号'); return; }
   const r = await jget('/api/order?orderId=' + encodeURIComponent(orderId));
@@ -2031,7 +2095,15 @@ async function lookupOrder(el) {
   push('order');
 }
 
+/* 需要登录才能看的页面（订单列表 / 订单详情 / 查单 / 我的）。
+   门店浏览永远不需要登录；这些页面先确认登录，再渲染。 */
+async function requireLogin(reason) {
+  if (hasAccessKey()) return true;
+  return await askKeyOnce(reason || '查看订单需要先登录。');
+}
+
 async function openOrderById(orderId) {
+  if (!await requireLogin('查看订单详情需要先登录。')) return;
   const r = await jget('/api/order?orderId=' + encodeURIComponent(orderId));
   if (!r.ok || !r.order) { toast(r.msg || '查不到这一单', 'wide'); return; }
   applyOrder(r); pushHistory(state.orderDetail); push('order');
@@ -2041,19 +2113,90 @@ async function openOrderById(orderId) {
 function orderCardHtml(o, i, kind) {
   const si = o.statusInfo || {};
   const tone = ['ok', 'warn', 'bad', 'mute', 'blue'].includes(si.tone) ? si.tone : 'mute';
-  const when = `${esc((kind === 'hist' ? o.day : o.date) || '')} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}`;
+  const code = Number(o.orderStatus);
+  const label = statusText(o.orderStatus, si);
+  const day = (kind === 'hist' ? o.day : o.date) || '';
+  const when = `${esc(day)} ${esc(hhmm(o.begin))}–${esc(hhmm(o.end))}`;
+  // 当前预约补一句「还有多久 / 已经开始了多久」，比单纯印时间有用
+  let hint = '';
+  if (kind === 'live') {
+    const at = orderBeginAt(o), endAt = orderEndAt(o);
+    if (at && endAt) {
+      const now = Date.now();
+      if (code === 6) hint = `进行中 · ${fmtLeft(endAt.getTime() - now)}后结束`;
+      else if (now < at.getTime()) hint = `${fmtLeft(at.getTime() - now)}后开始`;
+    }
+  }
+  // 底部只留「真正能做的动作」，不重复右上角已经写过的状态
+  const acts = [];
+  if ([3, 6].includes(code)) {
+    const at = orderBeginAt(o);
+    const adv = Number(o.advanceOpeningTime != null ? o.advanceOpeningTime : 45);
+    const from = at ? at.getTime() - adv * 60000 : null;
+    if (code === 6 || (from != null && Date.now() >= from)) acts.push('<b style="color:var(--brand)">可开门</b>');
+    else if (from != null) acts.push(`<span class="subtle">${hhmm2(new Date(from))} 可开门</span>`);
+  }
+  if (o.lightOpenStatus === 1) acts.push('灯已开');
+  if (o.cardTypeName) acts.push(esc(o.cardTypeName));
   return `<div class="ocard" data-i="${i}" data-kind="${kind}">
     <div class="ohd"><div class="oshop">${esc(o.storeName || '未知门店')}</div>
-      <span class="pill ${tone}">${esc(statusText(o.orderStatus, si))}</span></div>
+      <span class="pill ${tone}">${esc(label)}</span></div>
     <div class="obody">
-      <b>${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</b> · ${when}<br>
-      <span class="subtle mono">${esc(o.orderId)}</span>
+      <b>${esc(o.spaceName || '')} ${esc(o.seatName || '')} 号</b> · ${when}
+      ${hint ? `<div class="ohint">${esc(hint)}</div>` : ''}
+      <span class="subtle mono" style="display:block;margin-top:4px;font-size:11.5px;letter-spacing:-.2px">${esc(o.orderId)}</span>
     </div>
     <div class="ofoot">
-      <span>${esc(statusText(o.orderStatus, si))}${o.cardTypeName ? ' · ' + esc(o.cardTypeName) : ''}${o.lightOpenStatus != null ? ' · 灯' + (o.lightOpenStatus === 1 ? '已开' : '未开') : ''}</span>
-      <span>${[3, 6].includes(Number(o.orderStatus)) ? '<b style="color:var(--brand)">可开门</b> · ' : ''}详情 <span class="chev" style="display:inline-block"></span></span>
+      <span>${acts.join(' · ') || '<span class="subtle">' + esc(label) + '</span>'}</span>
+      <span>详情 <span class="chev" style="display:inline-block"></span></span>
     </div>
   </div>`;
+}
+
+/* 「还有 2 小时 15 分」这种人类能读的倒计时 */
+function fmtLeft(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 1) return '不到 1 分钟';
+  const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  if (d > 0) return `${d} 天 ${h} 小时`;
+  if (h > 0) return `${h} 小时 ${mm} 分`;
+  return `${mm} 分钟`;
+}
+
+/* 订单结束时刻：date/begin 同款拆字段，兼容跨天（endDate 与 date 不同） */
+function orderEndAt(o) {
+  if (!o) return null;
+  for (const k of ['endTime', 'studyEndTime', 'finishTime']) {
+    const raw = o[k];
+    if (raw && /\d{1,2}:\d{2}/.test(raw) && /\d{4}-\d{1,2}-\d{1,2}/.test(raw)) {
+      const t = new Date(String(raw).replace(' ', 'T'));
+      if (!isNaN(t)) return t;
+    }
+  }
+  const day = o.endDate || o.date || o.studyDate || '';
+  const end = o.end || o.studyEndTime || '';
+  const dm = String(day).match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const em = String(end).match(/(\d{1,2}):(\d{2})/);
+  if (dm && em) {
+    const t = new Date(Number(dm[1]), Number(dm[2]) - 1, Number(dm[3]), Number(em[1]), Number(em[2]), 0, 0);
+    if (!isNaN(t)) return t;
+  }
+  return null;
+}
+
+/* 列表卡片上的「可开门」标记。
+   必须和详情页用同一套窗口判定，否则会出现「列表说可开、点进去按钮是灰的」，
+   更糟的是让人以为随时能开，实际会被平台拒。 */
+function canOpenTag(o) {
+  const code = Number(o && o.orderStatus);
+  if (![3, 6].includes(code)) return '';
+  if (code === 6) return '<b style="color:var(--brand)">可开门</b> · ';   // 使用中：人已经在店里
+  const at = orderBeginAt(o);
+  if (!at) return '';
+  const adv = Number(o.advanceOpeningTime != null ? o.advanceOpeningTime : 45);
+  const from = at.getTime() - adv * 60000;
+  if (Date.now() >= from) return '<b style="color:var(--brand)">可开门</b> · ';
+  return `<span style="color:var(--ink-3)">${hhmm2(new Date(from))} 可开门</span> · `;
 }
 
 async function loadOrders(force) {
@@ -2213,7 +2356,7 @@ AFTER.me = (el) => {
         ${r.createCode != null ? `<br><span class="subtle">/user-face/create → code ${esc(String(r.createCode))} ${esc(r.createMsg || '')}</span>` : ''}
       </div>`;
       go.disabled = false; go.textContent = '上传并建立人脸档';
-      if (r.ok) toast('人脸档已建立');
+      if (r.ok) toast('人脸档已建立', 'success');
     };
   }
 };
